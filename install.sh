@@ -32,7 +32,7 @@ LIBUSB=${LIBUSB_DIR:-/opt/homebrew/opt/libusb}
 if [ ! -f "$LIBUSB/lib/libusb-1.0.0.dylib" ]; then
   ko "Falta libusb (solo hace falta para compilar). Instálala con:  brew install libusb"; exit 1
 fi
-ok "macOS $(sw_vers -productVersion), $(swiftc --version 2>&1 | head -1 | cut -c1-50), libusb"
+ok "macOS $(sw_vers -productVersion), $(swiftc --version 2>&1 | grep -o 'Swift version [0-9.]*' | head -1), libusb"
 
 say "2/4 Compilando"
 ./build.sh > /tmp/screendeck-build.log 2>&1 || { ko "Falló la compilación (log: /tmp/screendeck-build.log)"; tail -15 /tmp/screendeck-build.log; exit 1; }
