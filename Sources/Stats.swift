@@ -19,6 +19,14 @@ struct StatsSnapshot {
     var batteryCharging = false
     var onACPower = true
     var uptime: TimeInterval = 0
+    var volumes: [VolumeInfo] = []
+    var topCPU: [ProcessUsage] = []
+    var topMem: [ProcessUsage] = []
+    var gpu: Double? = nil                // 0...1
+    var gpuHistory: [Double] = Array(repeating: 0, count: 40)
+    var temps: [TempReading] = []
+    var thermalState = "Normal"
+    var batteries: [BatteryDevice] = []
 
     /// Datos de ejemplo para vistas previas y capturas.
     static let demo: StatsSnapshot = {
@@ -37,6 +45,32 @@ struct StatsSnapshot {
         s.netUpHistory = (0..<40).map { (i: Int) -> Double in 200_000.0 + 150_000.0 * sin(Double(i) / 5.0 + 1.0) }
         s.batteryPercent = 76; s.batteryCharging = true; s.onACPower = true
         s.uptime = 3 * 86400 + 5 * 3600
+        s.volumes = [
+            VolumeInfo(name: "Macintosh HD", path: "/", total: 994e9, free: 518e9, isExternal: false),
+            VolumeInfo(name: "Fotos", path: "/Volumes/Fotos", total: 2e12, free: 0.31e12, isExternal: true),
+            VolumeInfo(name: "Copias", path: "/Volumes/Copias", total: 4e12, free: 2.9e12, isExternal: true),
+            VolumeInfo(name: "SD", path: "/Volumes/SD", total: 64e9, free: 9e9, isExternal: true),
+        ]
+        s.topCPU = [ProcessUsage(name: "Safari", appPath: "/System/Cryptexes/App/System/Applications/Safari.app", cpu: 142, memBytes: 3.1e9),
+                    ProcessUsage(name: "Música", appPath: "/System/Applications/Music.app", cpu: 61, memBytes: 0.9e9),
+                    ProcessUsage(name: "WindowServer", appPath: nil, cpu: 24, memBytes: 0.5e9),
+                    ProcessUsage(name: "Mail", appPath: "/System/Applications/Mail.app", cpu: 12, memBytes: 0.7e9),
+                    ProcessUsage(name: "Notas", appPath: "/System/Applications/Notes.app", cpu: 8, memBytes: 0.3e9)]
+        s.topMem = [ProcessUsage(name: "Safari", appPath: "/System/Cryptexes/App/System/Applications/Safari.app", cpu: 142, memBytes: 4.8e9),
+                    ProcessUsage(name: "Música", appPath: "/System/Applications/Music.app", cpu: 61, memBytes: 1.9e9),
+                    ProcessUsage(name: "Mail", appPath: "/System/Applications/Mail.app", cpu: 12, memBytes: 1.2e9),
+                    ProcessUsage(name: "Notas", appPath: "/System/Applications/Notes.app", cpu: 8, memBytes: 0.9e9),
+                    ProcessUsage(name: "Finder", appPath: "/System/Library/CoreServices/Finder.app", cpu: 1, memBytes: 0.4e9)]
+        s.gpu = 0.37
+        s.gpuHistory = (0..<40).map { (i: Int) -> Double in 0.3 + 0.25 * sin(Double(i) / 3.5) + Double(i % 7) * 0.01 }
+        s.temps = [TempReading(name: "CPU", celsius: 58), TempReading(name: "GPU", celsius: 52),
+                   TempReading(name: "SSD", celsius: 44), TempReading(name: "Batería", celsius: 33)]
+        s.thermalState = "Normal"
+        s.batteries = [BatteryDevice(name: "Teclado Craft", percent: 18, charging: false, detail: nil, isInternal: false),
+                       BatteryDevice(name: "MX Master", percent: 50, charging: false, detail: nil, isInternal: false),
+                       BatteryDevice(name: "Magic Trackpad", percent: 65, charging: false, detail: nil, isInternal: false),
+                       BatteryDevice(name: "AirPods Pro", percent: 82, charging: false, detail: "I 80% · D 82% · Estuche 100%", isInternal: false),
+                       BatteryDevice(name: "Este Mac", percent: 76, charging: true, detail: nil, isInternal: true)].sorted { $0.isInternal && !$1.isInternal }
         return s
     }()
 }
@@ -49,9 +83,18 @@ final class SystemStats: ObservableObject {
     private var timer: Timer?
     private var lastTicks: (busy: UInt64, total: UInt64)?
     private var lastNet: (down: UInt64, up: UInt64, at: Date)?
+    private let background = DispatchQueue(label: "screendeck.stats", qos: .utility)
+    private var tick = 0
+    private var backgroundBusy = false
+    private var bluetoothBatteries: [BatteryDevice] = []
+    private var accessoryBatteries: [BatteryDevice] = []
+
+    /// Para las capturas del README: datos de ejemplo en vez de los del Mac.
+    var demoMode = false
 
     func start() {
         guard timer == nil else { return }
+        if demoMode { snapshot = StatsSnapshot.demo; return }
         sample()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.sample() }
         RunLoop.main.add(timer!, forMode: .common)
@@ -96,7 +139,42 @@ final class SystemStats: ObservableObject {
         let b = batteryInfo()
         s.batteryPercent = b.percent; s.batteryCharging = b.charging; s.onACPower = b.ac
         s.uptime = ProcessInfo.processInfo.systemUptime
+        s.batteries = BatteryReader.read(extras: accessoryBatteries + bluetoothBatteries)
         snapshot = s
+        sampleSlow()
+    }
+
+    /// Procesos, GPU, temperaturas y discos: más pesados, así que van en segundo plano y no en cada segundo.
+    private func sampleSlow() {
+        tick += 1
+        guard !backgroundBusy, tick % 4 == 1 else { return }
+        backgroundBusy = true
+        let wantVolumes = tick % 20 == 1 || snapshot.volumes.isEmpty
+        let wantBluetooth = tick % 60 == 1
+        background.async { [weak self] in
+            let procs = ProcessReader.read()
+            let gpu = GPUReader.utilization()
+            let temps = TemperatureReader.read()
+            let thermal = TemperatureReader.thermalState
+            let volumes = wantVolumes ? VolumeReader.read() : nil
+            let bluetooth = wantBluetooth ? BatteryReader.bluetoothExtras() : nil
+            let accessories = BatteryReader.accessories()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                var s = self.snapshot
+                s.topCPU = procs.cpu
+                s.topMem = procs.mem
+                s.gpu = gpu
+                if let gpu { s.gpuHistory = Array((s.gpuHistory + [gpu]).suffix(40)) }
+                s.temps = temps
+                s.thermalState = thermal
+                if let volumes { s.volumes = volumes }
+                if let bluetooth { self.bluetoothBatteries = bluetooth }
+                self.accessoryBatteries = accessories
+                self.snapshot = s
+                self.backgroundBusy = false
+            }
+        }
     }
 
     private func wrapDelta(_ new: UInt64, _ old: UInt64) -> UInt64 {

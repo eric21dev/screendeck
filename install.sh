@@ -51,5 +51,5 @@ n=$(screens)
 if [ "$n" -gt 0 ]; then ok "$n pantalla(s) conectada(s) detectada(s) por USB"
 else echo "  Aún no hay pantallas conectadas: enchúfalas y aparecerán solas en la barra lateral."; fi
 echo
-say "Listo. ScreenDeck no necesita ningún permiso de macOS."
+say "Listo. ScreenDeck solo pedirá permiso si eliges una carpeta protegida (Escritorio, Documentos o Descargas)."
 echo "Para que se abra sola al iniciar sesión, marca «Abrir al iniciar sesión» en la barra lateral."

@@ -6,7 +6,7 @@ SCREENDECK
    Ve a Ajustes del Sistema -> Privacidad y seguridad, baja hasta el aviso sobre ScreenDeck y pulsa "Abrir igualmente".
    Alternativa en la Terminal:  xattr -dr com.apple.quarantine /Applications/ScreenDeck.app
 3. Conecta tus pantallas Turing de 3,5" por USB: aparecen solas en la barra lateral.
-   ScreenDeck no necesita ningún permiso de macOS y no envía datos a ningún sitio.
+   ScreenDeck solo pedirá permiso si eliges una carpeta protegida de fotos (Escritorio, Documentos o Descargas) y solo se conecta a internet si usas los widgets Tiempo y Noticias.
 
 Requisitos: Mac con Apple Silicon y macOS 15 o superior.
 Código fuente y licencia (MIT): https://github.com/eric21dev/screendeck

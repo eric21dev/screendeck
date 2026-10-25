@@ -5,6 +5,7 @@ import AppKit
 
 enum WidgetKind: String, Codable, CaseIterable, Identifiable {
     case clock, system, network, battery, calendar, text, photo
+    case weather, disks, processes, thermal, news
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -15,6 +16,11 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .calendar: return "Calendario"
         case .text: return "Mensaje"
         case .photo: return "Foto"
+        case .weather: return "Tiempo"
+        case .disks: return "Discos"
+        case .processes: return "Procesos"
+        case .thermal: return "GPU y temperatura"
+        case .news: return "Noticias"
         }
     }
     var subtitle: String {
@@ -25,7 +31,12 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .battery: return "Batería y tiempo encendido"
         case .calendar: return "El mes actual"
         case .text: return "Tu texto en grande"
-        case .photo: return "Una imagen a pantalla completa"
+        case .photo: return "Una foto o una carpeta que va rotando"
+        case .weather: return "Temperatura y previsión de tu ciudad"
+        case .disks: return "Espacio de cada disco y memoria USB"
+        case .processes: return "Lo que más CPU y memoria usa"
+        case .thermal: return "Uso de la GPU y temperaturas"
+        case .news: return "Titulares y resúmenes que van pasando"
         }
     }
     var symbol: String {
@@ -37,6 +48,11 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .calendar: return "calendar"
         case .text: return "textformat"
         case .photo: return "photo.fill"
+        case .weather: return "cloud.sun.fill"
+        case .disks: return "internaldrive.fill"
+        case .processes: return "chart.bar.fill"
+        case .thermal: return "thermometer.medium"
+        case .news: return "newspaper.fill"
         }
     }
     var defaultAccent: String {
@@ -48,6 +64,11 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .calendar: return "#FF5C8A"
         case .text: return "#FFD93D"
         case .photo: return "#34C8FF"
+        case .weather: return "#FFB84D"
+        case .disks: return "#34C8FF"
+        case .processes: return "#FF5C8A"
+        case .thermal: return "#FF7A59"
+        case .news: return "#7C5CFF"
         }
     }
 }
@@ -58,11 +79,31 @@ struct WidgetItem: Codable, Identifiable, Hashable {
     var accent: String
     var text = "¡Hola!"
     var photoPath: String?
+    // Foto en modo carpeta (opcionales para que la configuración antigua siga cargando)
+    var photoUsesFolder: Bool?
+    var photoFolder: String?
+    var photoSeconds: Int?
+    var photoShuffle: Bool?
+    var photoFit: Bool?
+    // Tiempo
+    var weatherPlace: WeatherPlace?
+    // Noticias
+    var newsCategories: [String]?
+    var newsCustomURL: String?
+    var newsSeconds: Int?
 
     init(kind: WidgetKind) {
         self.kind = kind
         self.accent = kind.defaultAccent
     }
+
+    var usesFolder: Bool { photoUsesFolder ?? false }
+    var slideSeconds: Int { max(3, photoSeconds ?? 10) }
+    var shuffle: Bool { photoShuffle ?? false }
+    /// true = la foto se ve entera, con barras negras; false = rellena la pantalla recortando los bordes
+    var fitInside: Bool { photoFit ?? false }
+    var newsIDs: [String] { newsCategories ?? ["portada"] }
+    var newsSlideSeconds: Int { max(5, newsSeconds ?? 12) }
 }
 
 struct ScreenConfig: Codable, Equatable {
@@ -88,6 +129,13 @@ enum Store {
     }
     /// En el modo de capturas no se toca la configuración guardada.
     static var disabled = false
+    private static let orderKey = "screens.order.v1"
+    /// Orden de las pantallas en la barra lateral (claves USB), conectadas o no.
+    static func loadOrder() -> [String] { UserDefaults.standard.stringArray(forKey: orderKey) ?? [] }
+    static func saveOrder(_ v: [String]) {
+        if disabled { return }
+        UserDefaults.standard.set(v, forKey: orderKey)
+    }
     static func save(_ v: [String: ScreenConfig]) {
         if disabled { return }
         if let d = try? JSONEncoder().encode(v) { UserDefaults.standard.set(d, forKey: key) }
@@ -115,8 +163,8 @@ struct BuildInfo {
 
 enum Renderer {
     /// Renderiza el widget a un CGImage de exactamente `size` píxeles.
-    @MainActor static func image(_ item: WidgetItem, snap: StatsSnapshot, date: Date, size: CGSize) -> CGImage? {
-        let r = ImageRenderer(content: WidgetCanvas(item: item, snap: snap, date: date, size: size))
+    @MainActor static func image(_ item: WidgetItem, snap: StatsSnapshot, date: Date, size: CGSize, demo: Bool = false) -> CGImage? {
+        let r = ImageRenderer(content: WidgetCanvas(item: item, snap: snap, date: date, size: size, demo: demo))
         r.scale = 1
         r.isOpaque = true
         return r.cgImage
@@ -322,12 +370,41 @@ final class ScreenController: ObservableObject, Identifiable {
 
 // MARK: - Todas las pantallas
 
+/// Una fila de la barra lateral: una pantalla conectada o una guardada sin conectar.
+enum ScreenEntry: Identifiable {
+    case online(ScreenController)
+    case offline(OfflineScreen)
+    var id: String {
+        switch self {
+        case .online(let c): return c.key
+        case .offline(let o): return o.key
+        }
+    }
+}
+
+struct RenameRequest {
+    var key: String
+    var draft: String
+}
+
+/// Una pantalla de la que hay configuración guardada pero que ahora no está conectada.
+struct OfflineScreen: Identifiable {
+    let key: String
+    let config: ScreenConfig
+    var id: String { key }
+}
+
 @MainActor
 final class ScreenManager: ObservableObject {
     static let shared = ScreenManager()
     @Published private(set) var screens: [ScreenController] = []
+    @Published private(set) var offline: [OfflineScreen] = []
+    /// Orden elegido por el usuario. Incluye también las pantallas sin conectar, que conservan su sitio.
+    @Published private(set) var order: [String] = Store.loadOrder()
     @Published private(set) var scanning = true
     @Published var selection: String?
+    /// Cuadro «Renombrar pantalla» abierto desde el menú de la barra lateral.
+    @Published var renaming: RenameRequest?
 
     private var saved = Store.load()
     private var timer: Timer?
@@ -336,28 +413,53 @@ final class ScreenManager: ObservableObject {
         guard timer == nil else { return }
         SystemStats.shared.start()
         scan()
+        refreshOffline()
+        syncOrder()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.scan() }
         }
         RunLoop.main.add(timer!, forMode: .common)
     }
 
+    /// Primer «Pantalla N» que no esté en uso (así no se repiten nombres tras olvidar alguna).
+    private func nextName() -> String {
+        let used = Set(saved.values.map(\.name))
+        var n = 1
+        while used.contains("Pantalla \(n)") { n += 1 }
+        return "Pantalla \(n)"
+    }
+
+    private func persist() { Store.save(saved) }
+
+    private func refreshOffline() {
+        let connected = Set(screens.map(\.key))
+        offline = saved.filter { !connected.contains($0.key) }
+            .map { OfflineScreen(key: $0.key, config: $0.value) }
+            .sorted { $0.config.name.localizedStandardCompare($1.config.name) == .orderedAscending }
+    }
+
     func scan() {
         let keys = USBBus.shared.connectedKeys()
+        var changed = false
         // Desconectadas
-        for s in screens where !keys.contains(s.key) { s.stop() }
+        for s in screens where !keys.contains(s.key) { s.stop(); changed = true }
         screens.removeAll { !keys.contains($0.key) }
         // Nuevas
         for k in keys where !screens.contains(where: { $0.key == k }) {
-            let cfg = saved[k] ?? ScreenConfig(name: "Pantalla \(saved.count + 1)")
-            saved[k] = cfg
+            let cfg = saved[k] ?? ScreenConfig(name: nextName())
+            if saved[k] == nil { saved[k] = cfg; persist() }
             let c = ScreenController(key: k, config: cfg)
-            c.onChange = { [weak self] key, cfg in self?.saved[key] = cfg; Store.save(self?.saved ?? [:]) }
+            c.onChange = { [weak self] key, cfg in self?.saved[key] = cfg; self?.persist() }
             screens.append(c)
             c.start()
+            changed = true
         }
-        Store.save(saved)
-        if selection == nil || !screens.contains(where: { $0.key == selection }) { selection = screens.first?.key }
+        if changed { refreshOffline() }
+        syncOrder()
+        // Si la pantalla seleccionada ya no existe ni está guardada, se pasa a la primera conectada
+        if selection == nil || (!screens.contains(where: { $0.key == selection }) && saved[selection ?? ""] == nil) {
+            selection = screens.first?.key
+        }
         scanning = screens.isEmpty
     }
 
@@ -370,4 +472,100 @@ final class ScreenManager: ObservableObject {
     }
 
     func setAll(on: Bool) { screens.forEach { $0.config.isOn = on } }
+
+    // MARK: orden de la lista
+
+    /// Todas las pantallas conocidas, en el orden elegido por el usuario.
+    var entries: [ScreenEntry] {
+        order.compactMap { k in
+            if let c = screens.first(where: { $0.key == k }) { return .online(c) }
+            if let o = offline.first(where: { $0.key == k }) { return .offline(o) }
+            return nil
+        }
+    }
+
+    private func setOrder(_ o: [String]) {
+        guard o != order else { return }
+        order = o
+        Store.saveOrder(o)
+    }
+
+    /// Mantiene `order` al día: las pantallas nuevas van al final y las olvidadas desaparecen.
+    private func syncOrder() {
+        let known = Set(saved.keys).union(screens.map(\.key))
+        var o = order.filter { known.contains($0) }
+        var seen = Set(o)
+        for k in screens.map(\.key) + saved.keys.sorted() where seen.insert(k).inserted { o.append(k) }
+        setOrder(o)
+    }
+
+    /// Arrastrar `key` sobre `target`: ocupa su posición.
+    func move(_ key: String, onto target: String) {
+        guard key != target, let from = order.firstIndex(of: key), let to = order.firstIndex(of: target) else { return }
+        var o = order
+        o.remove(at: from)
+        o.insert(key, at: to)
+        setOrder(o)
+    }
+
+    func moveBy(_ key: String, _ delta: Int) {
+        guard let i = order.firstIndex(of: key), order.indices.contains(i + delta) else { return }
+        var o = order
+        o.swapAt(i, i + delta)
+        setOrder(o)
+    }
+
+    func canMove(_ key: String, _ delta: Int) -> Bool {
+        guard let i = order.firstIndex(of: key) else { return false }
+        return order.indices.contains(i + delta)
+    }
+
+    /// Solo para las capturas de pruebas: añade pantallas guardadas inventadas (no se guardan).
+    func addDemoOffline(_ list: [(key: String, name: String)]) {
+        for (k, n) in list where saved[k] == nil { saved[k] = ScreenConfig(name: n) }
+        refreshOffline()
+        syncOrder()
+    }
+
+    func beginRename(_ key: String, name: String) { renaming = RenameRequest(key: key, draft: name) }
+
+    /// Cambia el nombre de una pantalla, esté conectada o no. Se guarda en la configuración de esa pantalla.
+    func rename(_ key: String, to raw: String) {
+        let name = String(raw.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+        guard !name.isEmpty else { return }
+        if let c = screens.first(where: { $0.key == key }) {
+            c.config.name = name                      // dispara el guardado
+        } else if saved[key] != nil {
+            saved[key]?.name = name
+            persist()
+            refreshOffline()
+        }
+    }
+
+    /// Traslada la configuración guardada de una pantalla sin conectar a una pantalla conectada (nombre, brillo,
+    /// orientación y widgets). La entrada guardada se elimina: pasa a vivir en la pantalla de destino.
+    func adopt(_ o: OfflineScreen, into c: ScreenController) {
+        saved.removeValue(forKey: o.key)
+        c.config = o.config          // dispara el guardado y aplica brillo y orientación
+        persist()
+        // La pantalla de destino ocupa el sitio de la guardada
+        var ord: [String] = []
+        for k in order {
+            if k == o.key { ord.append(c.key) } else if k != c.key { ord.append(k) }
+        }
+        if !ord.contains(c.key) { ord.append(c.key) }
+        setOrder(ord)
+        refreshOffline()
+        selection = c.key
+    }
+
+    /// Borra la configuración guardada de una pantalla que no está conectada.
+    func forget(_ o: OfflineScreen) {
+        guard !screens.contains(where: { $0.key == o.key }) else { return }
+        saved.removeValue(forKey: o.key)
+        persist()
+        refreshOffline()
+        setOrder(order.filter { $0 != o.key })
+        if selection == o.key { selection = screens.first?.key }
+    }
 }

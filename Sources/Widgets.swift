@@ -17,7 +17,7 @@ extension Color {
 let accentChoices = ["#34C8FF", "#7C5CFF", "#FF5C8A", "#FF9F43", "#2ED573", "#FFD93D", "#FFFFFF", "#FF4D4D"]
 
 private var formatters: [String: DateFormatter] = [:]
-private func fmt(_ date: Date, _ pattern: String) -> String {
+func fmt(_ date: Date, _ pattern: String) -> String {
     let f = formatters[pattern] ?? {
         let f = DateFormatter()
         f.locale = Locale(identifier: "es_ES")
@@ -28,18 +28,18 @@ private func fmt(_ date: Date, _ pattern: String) -> String {
     return f.string(from: date)
 }
 
-private func num(_ v: Double, _ decimals: Int = 0) -> String {
+func num(_ v: Double, _ decimals: Int = 0) -> String {
     String(format: "%.\(decimals)f", v).replacingOccurrences(of: ".", with: ",")
 }
 
-private func speed(_ bytesPerSecond: Double) -> (String, String) {
+func speed(_ bytesPerSecond: Double) -> (String, String) {
     let kb = bytesPerSecond / 1000
     if kb < 1000 { return (num(kb, kb < 10 ? 1 : 0), "KB/s") }
     let mb = kb / 1000
     return (num(mb, mb < 100 ? 1 : 0), "MB/s")
 }
 
-private func uptimeText(_ t: TimeInterval) -> String {
+func uptimeText(_ t: TimeInterval) -> String {
     let d = Int(t) / 86400, h = (Int(t) % 86400) / 3600, m = (Int(t) % 3600) / 60
     if d > 0 { return "\(d) d \(h) h" }
     if h > 0 { return "\(h) h \(m) min" }
@@ -91,7 +91,7 @@ struct Sparkline: View {
     }
 }
 
-private struct Header: View {
+struct Header: View {
     var symbol: String
     var title: String
     var color: Color
@@ -115,6 +115,8 @@ struct WidgetCanvas: View {
     let snap: StatsSnapshot
     let date: Date
     let size: CGSize
+    /// Datos de ejemplo cuando el widget todavía no está configurado (galería y capturas).
+    var demo = false
 
     var body: some View {
         ZStack {
@@ -138,10 +140,15 @@ struct WidgetCanvas: View {
         case .clock: ClockWidget(item: item, date: date)
         case .system: SystemWidget(item: item, snap: snap, date: date, size: size)
         case .network: NetworkWidget(item: item, snap: snap, date: date, size: size)
-        case .battery: BatteryWidget(item: item, snap: snap, date: date)
+        case .battery: BatteryWidget(item: item, snap: snap, date: date, size: size)
         case .calendar: CalendarWidget(item: item, date: date, size: size)
         case .text: TextWidget(item: item)
-        case .photo: PhotoWidget(item: item, size: size)
+        case .photo: PhotoWidget(item: item, date: date, size: size)
+        case .weather: WeatherWidget(item: item, date: date, size: size, demo: demo)
+        case .disks: DisksWidget(item: item, snap: snap, date: date, size: size)
+        case .processes: ProcessesWidget(item: item, snap: snap, date: date, size: size)
+        case .thermal: ThermalWidget(item: item, snap: snap, date: date, size: size)
+        case .news: NewsWidget(item: item, date: date, size: size, demo: demo)
         }
     }
 }
@@ -294,36 +301,102 @@ struct BatteryWidget: View {
     let item: WidgetItem
     let snap: StatsSnapshot
     let date: Date
+    let size: CGSize
+
+    private func levelColor(_ d: BatteryDevice, _ acc: Color) -> Color {
+        if d.charging { return Color(hex: "#2ED573") }
+        return d.percent <= 20 ? Color(hex: "#FF4D4D") : (d.percent <= 40 ? Color(hex: "#FF9F43") : acc)
+    }
+
     var body: some View {
         let acc = Color(hex: item.accent)
+        let devices = snap.batteries
+        let portrait = size.height >= size.width
         VStack(spacing: 0) {
-            Header(symbol: "bolt.fill", title: "ENERGÍA", color: acc, date: date)
-            Spacer()
-            if let p = snap.batteryPercent {
-                let level = Double(p) / 100
-                let color: Color = p <= 20 && !snap.batteryCharging ? Color(hex: "#FF4D4D") : acc
-                HStack(spacing: 4) {
-                    ZStack(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(.white.opacity(0.35), lineWidth: 5)
-                        RoundedRectangle(cornerRadius: 15, style: .continuous).fill(color)
-                            .frame(width: max(14, 214 * level), height: 78).padding(.leading, 7)
-                    }
-                    .frame(width: 228, height: 92)
-                    RoundedRectangle(cornerRadius: 3).fill(.white.opacity(0.35)).frame(width: 7, height: 34)
-                }
-                Text("\(p)%").font(.system(size: 70, weight: .bold, design: .rounded)).monospacedDigit().foregroundStyle(.white).padding(.top, 14)
-                Text(snap.batteryCharging ? "Cargando" : (snap.onACPower ? "Cargada" : "Con batería"))
-                    .font(.system(size: 19, weight: .semibold, design: .rounded)).foregroundStyle(color)
-            } else {
+            Header(symbol: "bolt.fill", title: devices.count > 1 ? "BATERÍAS" : "ENERGÍA", color: acc, date: date)
+            if devices.isEmpty {
+                Spacer()
                 Image(systemName: "powerplug.fill").font(.system(size: 84)).foregroundStyle(acc)
                 Text("Conectado a la corriente").font(.system(size: 21, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white).padding(.top, 16)
+                Spacer()
+            } else if devices.count == 1 {
+                single(devices[0], acc)
+            } else {
+                list(devices, acc, portrait: portrait)
             }
-            Spacer()
             Text("Encendido hace \(uptimeText(snap.uptime))")
-                .font(.system(size: 15, weight: .medium, design: .rounded)).foregroundStyle(.white.opacity(0.5))
+                .font(.system(size: 14, weight: .medium, design: .rounded)).foregroundStyle(.white.opacity(0.5)).padding(.top, 8)
         }
-        .padding(22)
+        .padding(portrait ? 22 : 18)
+    }
+
+    /// Un solo dispositivo: la vista grande de siempre.
+    @ViewBuilder private func single(_ d: BatteryDevice, _ acc: Color) -> some View {
+        let color = levelColor(d, acc)
+        let level = Double(d.percent) / 100
+        Spacer()
+        HStack(spacing: 4) {
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(.white.opacity(0.35), lineWidth: 5)
+                RoundedRectangle(cornerRadius: 15, style: .continuous).fill(color)
+                    .frame(width: max(14, 214 * level), height: 78).padding(.leading, 7)
+            }
+            .frame(width: 228, height: 92)
+            RoundedRectangle(cornerRadius: 3).fill(.white.opacity(0.35)).frame(width: 7, height: 34)
+        }
+        Text("\(d.percent)%").font(.system(size: 70, weight: .bold, design: .rounded)).monospacedDigit().foregroundStyle(.white).padding(.top, 14)
+        Text(d.charging ? "Cargando" : d.name).font(.system(size: 19, weight: .semibold, design: .rounded)).foregroundStyle(color)
+        Spacer()
+    }
+
+    @ViewBuilder private func list(_ all: [BatteryDevice], _ acc: Color, portrait: Bool) -> some View {
+        let maxRows = portrait ? 6 : 6
+        let shown = Array(all.prefix(maxRows))
+        VStack(spacing: 8) {
+            if portrait {
+                ForEach(Array(shown.enumerated()), id: \.offset) { _, d in row(d, acc, compact: false) }
+            } else {
+                let half = (shown.count + 1) / 2
+                HStack(alignment: .top, spacing: 10) {
+                    VStack(spacing: 8) { ForEach(Array(shown.prefix(half).enumerated()), id: \.offset) { _, d in row(d, acc, compact: true) } }
+                    VStack(spacing: 8) { ForEach(Array(shown.dropFirst(half).enumerated()), id: \.offset) { _, d in row(d, acc, compact: true) } }
+                }
+            }
+            if all.count > maxRows {
+                Text("+ \(all.count - maxRows) más").font(.system(size: 13, weight: .medium, design: .rounded)).foregroundStyle(.white.opacity(0.5))
+            }
+        }
+        .padding(.top, 10)
+        Spacer(minLength: 0)
+    }
+
+    private func row(_ d: BatteryDevice, _ acc: Color, compact: Bool) -> some View {
+        let c = levelColor(d, acc)
+        return VStack(spacing: 6) {
+            HStack(spacing: 10) {
+                Image(systemName: d.symbol).font(.system(size: compact ? 15 : 18)).foregroundStyle(acc).frame(width: compact ? 20 : 26)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(d.name).font(.system(size: compact ? 13.5 : 15, weight: .semibold, design: .rounded)).foregroundStyle(.white).lineLimit(1).minimumScaleFactor(0.7)
+                    if d.charging || d.detail != nil || d.percent <= 20 {
+                        Text(d.charging ? "Cargando" : (d.detail ?? "Batería baja"))
+                            .font(.system(size: 11.5, weight: .medium, design: .rounded)).foregroundStyle(d.charging ? c : .white.opacity(0.5)).lineLimit(1).minimumScaleFactor(0.7)
+                    }
+                }
+                Spacer(minLength: 4)
+                if d.charging { Image(systemName: "bolt.fill").font(.system(size: 12)).foregroundStyle(c) }
+                Text("\(d.percent)%").font(.system(size: compact ? 16 : 18, weight: .bold, design: .rounded)).monospacedDigit().foregroundStyle(c)
+            }
+            GeometryReader { g in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.1))
+                    Capsule().fill(c).frame(width: max(5, g.size.width * Double(d.percent) / 100))
+                }
+            }
+            .frame(height: 5)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.white.opacity(0.06)))
     }
 }
 
@@ -402,29 +475,120 @@ struct TextWidget: View {
 
 struct PhotoWidget: View {
     let item: WidgetItem
+    let date: Date
     let size: CGSize
+
+    private var emptyMessage: (symbol: String, text: String) {
+        if !item.usesFolder { return ("photo.on.rectangle.angled", "Elige una foto") }
+        guard let f = item.photoFolder else { return ("folder", "Elige una carpeta") }
+        return PhotoCache.files(in: f).isEmpty ? ("photo.badge.exclamationmark", "No hay imágenes en la carpeta") : ("photo.badge.exclamationmark", "No se pueden leer las imágenes")
+    }
+
     var body: some View {
-        if let path = item.photoPath, let img = PhotoCache.image(path) {
-            Image(nsImage: img).resizable().scaledToFill()
+        if let img = PhotoCache.current(for: item, date: date) {
+            if item.fitInside {
+                ZStack {
+                    Color.black
+                    Image(nsImage: img).resizable().scaledToFit()
+                }
                 .frame(width: size.width, height: size.height).clipped()
+            } else {
+                Image(nsImage: img).resizable().scaledToFill()
+                    .frame(width: size.width, height: size.height).clipped()
+            }
         } else {
+            let m = emptyMessage
             ZStack {
                 Color(hex: "#0E1424")
                 VStack(spacing: 12) {
-                    Image(systemName: "photo.on.rectangle.angled").font(.system(size: 56)).foregroundStyle(Color(hex: item.accent))
-                    Text("Elige una foto").font(.system(size: 20, weight: .semibold, design: .rounded)).foregroundStyle(.white.opacity(0.7))
+                    Image(systemName: m.symbol).font(.system(size: 56)).foregroundStyle(Color(hex: item.accent))
+                    Text(m.text).font(.system(size: 20, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.7)).multilineTextAlignment(.center).padding(.horizontal, 24)
                 }
             }
         }
     }
 }
 
+/// Carga de fotos y recorrido de carpetas. Las imágenes se reducen al abrirlas (basta 960 px para una pantalla de 480)
+/// y solo se guardan unas pocas en memoria, así que una carpeta de fotos de 12 megapíxeles no pesa.
 enum PhotoCache {
-    private static var cache: [String: NSImage] = [:]
+    static let extensions: Set<String> = ["jpg", "jpeg", "png", "heic", "heif", "gif", "tif", "tiff", "bmp", "webp"]
+    private static var images: [String: NSImage] = [:]
+    private static var recent: [String] = []
+    private static var broken: Set<String> = []
+    private static var listings: [String: (at: Date, files: [String])] = [:]
+
+    /// Imágenes de la carpeta, ordenadas por nombre. Se vuelve a leer cada 30 s, así que las nuevas aparecen solas.
+    static func files(in folder: String) -> [String] {
+        if let l = listings[folder], Date().timeIntervalSince(l.at) < 30 { return l.files.filter { !broken.contains($0) } }
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? []
+        let files = names
+            .filter { !$0.hasPrefix(".") && extensions.contains(($0 as NSString).pathExtension.lowercased()) }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            .map { (folder as NSString).appendingPathComponent($0) }
+        listings[folder] = (Date(), files)
+        return files.filter { !broken.contains($0) }
+    }
+
     static func image(_ path: String) -> NSImage? {
-        if let i = cache[path] { return i }
-        guard let i = NSImage(contentsOfFile: path) else { return nil }
-        cache[path] = i
-        return i
+        if let i = images[path] { return i }
+        if broken.contains(path) { return nil }
+        guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil) else { broken.insert(path); return nil }
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,      // respeta la orientación de la foto
+            kCGImageSourceThumbnailMaxPixelSize: 960,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { broken.insert(path); return nil }
+        let img = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+        images[path] = img
+        recent.append(path)
+        if recent.count > 8 { images[recent.removeFirst()] = nil }
+        return img
+    }
+
+    /// Ruta de la imagen que toca en `date`. Depende solo de la hora, así que todas las pantallas con la misma carpeta
+    /// y el mismo intervalo van a la par, y no hace falta guardar ningún estado.
+    static func path(for item: WidgetItem, date: Date, skipping extra: Int = 0) -> String? {
+        guard item.usesFolder else { return item.photoPath }
+        guard let folder = item.photoFolder else { return nil }
+        let files = files(in: folder)
+        guard !files.isEmpty else { return nil }
+        let step = Int(date.timeIntervalSince1970) / item.slideSeconds + extra
+        let n = files.count
+        if !item.shuffle { return files[step % n] }
+        // Orden aleatorio: una mezcla distinta en cada vuelta completa, estable durante la vuelta
+        return files[permutation(n, seed: stableHash(folder) &+ UInt64(step / n))[step % n]]
+    }
+
+    /// La imagen que toca; si una está dañada, pasa a la siguiente.
+    static func current(for item: WidgetItem, date: Date) -> NSImage? {
+        let tries = item.usesFolder ? min(8, max(1, item.photoFolder.map { files(in: $0).count } ?? 1)) : 1
+        for extra in 0..<tries {
+            if let p = path(for: item, date: date, skipping: extra), let i = image(p) { return i }
+        }
+        return nil
+    }
+
+    private static func stableHash(_ s: String) -> UInt64 {
+        var h: UInt64 = 5381
+        for b in s.utf8 { h = (h &* 33) &+ UInt64(b) }
+        return h
+    }
+
+    private static func permutation(_ n: Int, seed: UInt64) -> [Int] {
+        var state = seed
+        func next() -> UInt64 {                       // SplitMix64
+            state = state &+ 0x9E3779B97F4A7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+            z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+            return z ^ (z >> 31)
+        }
+        var a = Array(0..<n)
+        if n > 1 { for i in stride(from: n - 1, to: 0, by: -1) { a.swapAt(i, Int(next() % UInt64(i + 1))) } }
+        return a
     }
 }

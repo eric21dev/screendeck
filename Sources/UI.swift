@@ -14,6 +14,8 @@ struct RootView: View {
             Group {
                 if let c = manager.screens.first(where: { $0.key == manager.selection }) {
                     ScreenDetail(c: c).id(c.key)
+                } else if let o = manager.offline.first(where: { $0.key == manager.selection }) {
+                    OfflineDetail(o: o).id(o.key)
                 } else {
                     EmptyState()
                 }
@@ -21,6 +23,13 @@ struct RootView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .alert("Renombrar pantalla", isPresented: Binding(get: { manager.renaming != nil }, set: { if !$0 { manager.renaming = nil } })) {
+            TextField("Nombre", text: Binding(get: { manager.renaming?.draft ?? "" }, set: { manager.renaming?.draft = $0 }))
+            Button("Guardar") { if let r = manager.renaming { manager.rename(r.key, to: r.draft) }; manager.renaming = nil }
+            Button("Cancelar", role: .cancel) { manager.renaming = nil }
+        } message: {
+            Text("ID \(manager.renaming?.key ?? "")")
+        }
         .overlay(alignment: .bottomTrailing) {
             Text(BuildInfo.current.label)
                 .font(.system(size: 10, design: .monospaced))
@@ -37,6 +46,20 @@ struct RootView: View {
 struct Sidebar: View {
     @EnvironmentObject var manager: ScreenManager
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var dropTarget: String?
+    static let dragPrefix = "screendeck-pantalla:"
+
+    @ViewBuilder private func rowMenu(_ e: ScreenEntry) -> some View {
+        Button("Renombrar…") {
+            switch e {
+            case .online(let c): manager.beginRename(c.key, name: c.config.name)
+            case .offline(let o): manager.beginRename(o.key, name: o.config.name)
+            }
+        }
+        Divider()
+        Button("Mover arriba") { manager.moveBy(e.id, -1) }.disabled(!manager.canMove(e.id, -1))
+        Button("Mover abajo") { manager.moveBy(e.id, 1) }.disabled(!manager.canMove(e.id, 1))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -51,9 +74,27 @@ struct Sidebar: View {
 
             ScrollView {
                 VStack(spacing: 4) {
-                    ForEach(manager.screens) { c in
-                        SidebarRow(c: c, selected: manager.selection == c.key)
-                            .onTapGesture { manager.selection = c.key }
+                    ForEach(manager.entries) { e in
+                        Group {
+                            switch e {
+                            case .online(let c): SidebarRow(c: c, selected: manager.selection == c.key)
+                            case .offline(let o): OfflineRow(o: o, selected: manager.selection == o.key)
+                            }
+                        }
+                        .onTapGesture { manager.selection = e.id }
+                        .contextMenu { rowMenu(e) }
+                        // Arrastrar una fila sobre otra para cambiar el orden; se guarda y se mantiene aunque se desconecte
+                        .draggable(Sidebar.dragPrefix + e.id)
+                        .dropDestination(for: String.self) { items, _ in
+                            dropTarget = nil
+                            guard let s = items.first, s.hasPrefix(Sidebar.dragPrefix) else { return false }
+                            manager.move(String(s.dropFirst(Sidebar.dragPrefix.count)), onto: e.id)
+                            return true
+                        } isTargeted: { over in
+                            if over { dropTarget = e.id } else if dropTarget == e.id { dropTarget = nil }
+                        }
+                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.accentColor, lineWidth: 2).opacity(dropTarget == e.id ? 1 : 0).allowsHitTesting(false))
                     }
                     if manager.screens.isEmpty {
                         HStack(spacing: 10) {
@@ -101,6 +142,7 @@ struct SidebarRow: View {
                     Circle().fill(statusColor).frame(width: 7, height: 7)
                     Text(statusText).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                 }
+                IDBadge(key: c.key)
             }
             Spacer(minLength: 0)
         }
@@ -123,6 +165,93 @@ struct SidebarRow: View {
         case .connecting: return "Conectando…"
         case .error: return "Sin respuesta"
         }
+    }
+}
+
+/// Nombre de la pantalla editable: se ve claramente que se puede cambiar (lápiz, fondo al pasar el ratón y borde al editar).
+/// Se guarda al pulsar Intro o al salir del campo; si se deja vacío, vuelve al nombre anterior.
+struct RenameField: View {
+    let name: String
+    let onCommit: (String) -> Void
+    @State private var text = ""
+    @State private var hover = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            // El texto invisible fija el ancho: el campo se ajusta al nombre y el lápiz queda pegado a él
+            Text(text.isEmpty ? "Nombre de la pantalla" : text)
+                .font(.system(size: 30, weight: .bold, design: .rounded)).lineLimit(1).opacity(0).padding(.trailing, 8)
+                .overlay(alignment: .leading) {
+                    TextField("Nombre de la pantalla", text: $text)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 30, weight: .bold, design: .rounded))
+                        .focused($focused)
+                        .onSubmit { commit() }
+                }
+            Image(systemName: focused ? "checkmark.circle.fill" : "pencil")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(focused || hover ? Color.accentColor : Color.secondary)
+                .onTapGesture { if focused { commit(); focused = false } else { focused = true } }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 3)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(focused ? Color.primary.opacity(0.09) : (hover ? Color.primary.opacity(0.05) : .clear)))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(focused ? Color.accentColor : .clear, lineWidth: 1.5))
+        .frame(maxWidth: 520, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .onHover { hover = $0 }
+        .onAppear { text = name }
+        .onChange(of: name) { n in if !focused { text = n } }
+        .onChange(of: focused) { f in if !f { commit() } }
+        .help("Haz clic para cambiar el nombre de la pantalla")
+    }
+
+    private func commit() {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty { text = name; return }
+        let n = String(t.prefix(40))
+        text = n
+        if n != name { onCommit(n) }
+    }
+}
+
+/// Identificador de la pantalla: el puerto USB al que está conectada (bus y ruta de puertos).
+/// Las pantallas no tienen un número de serie propio, así que ScreenDeck las reconoce por el puerto.
+struct IDBadge: View {
+    let key: String
+    var body: some View {
+        Text("ID \(key)")
+            .font(.system(size: 10.5, design: .monospaced))
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
+            .help("Puerto USB al que está conectada. Las pantallas no tienen número de serie propio, así que ScreenDeck las reconoce por el puerto.")
+    }
+}
+
+struct OfflineRow: View {
+    let o: OfflineScreen
+    var selected: Bool
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Color.primary.opacity(0.08))
+                Image(systemName: "display").font(.system(size: 14)).foregroundStyle(.secondary)
+            }
+            .frame(width: 34, height: 50)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(o.config.name).font(.system(size: 14, weight: .semibold)).lineLimit(1).foregroundStyle(.secondary)
+                HStack(spacing: 5) {
+                    Circle().fill(Color.gray.opacity(0.6)).frame(width: 7, height: 7)
+                    Text("Sin conectar").font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+                IDBadge(key: o.key)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(selected ? Color.accentColor.opacity(0.16) : .clear))
+        .contentShape(Rectangle())
     }
 }
 
@@ -182,8 +311,11 @@ struct ScreenDetail: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 14) {
-            TextField("Nombre", text: $c.config.name)
-                .textFieldStyle(.plain).font(.system(size: 30, weight: .bold, design: .rounded))
+            VStack(alignment: .leading, spacing: 2) {
+                RenameField(name: c.config.name) { c.config.name = $0 }
+                Text("ID \(c.key)").font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+                    .help("Puerto USB al que está conectada. Las pantallas no tienen número de serie propio, así que ScreenDeck las reconoce por el puerto.")
+            }
             Spacer()
             StatusPill(status: c.status)
         }
@@ -238,6 +370,23 @@ struct ScreenDetail: View {
         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.primary.opacity(0.07)))
     }
 
+    /// Qué está pintando ahora la pantalla y, si rota, cuánto falta para el siguiente.
+    @ViewBuilder private var liveLine: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { ctx in
+            if c.config.isOn, c.status == .ready, let k = c.currentKind {
+                let step = max(2, c.config.rotationSeconds)
+                let left = step - Int(ctx.date.timeIntervalSince1970) % step
+                HStack(spacing: 7) {
+                    LiveDot()
+                    (Text("En pantalla ahora: ") + Text(k.title).bold().foregroundColor(.primary)
+                        + Text(c.config.items.count > 1 ? " · cambia en \(left) s" : ""))
+                        .font(.system(size: 13)).foregroundStyle(.secondary).monospacedDigit()
+                }
+                .padding(.top, 2)
+            }
+        }
+    }
+
     private var gallery: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 3) {
@@ -246,6 +395,7 @@ struct ScreenDetail: View {
                      ? "Se van alternando las \(c.config.items.count) pantallas marcadas."
                      : "Marca más de una y se irán alternando.")
                     .font(.system(size: 13)).foregroundStyle(.secondary)
+                liveLine
             }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 200), spacing: 16)], alignment: .leading, spacing: 18) {
                 ForEach(WidgetKind.allCases) { k in
@@ -329,10 +479,12 @@ struct WidgetThumb: View {
     let item: WidgetItem
     let size: CGSize
     let width: CGFloat
+    /// Tarjetas sin usar: datos de ejemplo, sin descargar nada de internet.
+    let demo: Bool
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { ctx in
             let s = width / size.width
-            WidgetCanvas(item: item, snap: stats.snapshot, date: ctx.date, size: size)
+            WidgetCanvas(item: item, snap: stats.snapshot, date: ctx.date, size: size, demo: demo)
                 .scaleEffect(s, anchor: .topLeading)
                 .frame(width: size.width * s, height: size.height * s, alignment: .topLeading)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -349,11 +501,21 @@ struct WidgetCard: View {
         let used = c.isUsing(kind)
         let item = c.config.items.first { $0.kind == kind } ?? WidgetItem(kind: kind)
         let size = c.config.orientation.isPortrait ? CGSize(width: 320, height: 480) : CGSize(width: 480, height: 320)
+        let live = c.config.isOn && c.status == .ready && c.currentKind == kind
         VStack(alignment: .leading, spacing: 10) {
             ZStack(alignment: .topTrailing) {
-                WidgetThumb(item: item, size: size, width: 150)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .opacity(used ? 1 : 0.55)
+                ZStack(alignment: .topLeading) {
+                    if live, let frame = c.preview {
+                        // El fotograma exacto que se está enviando a la pantalla
+                        Image(nsImage: frame).resizable().aspectRatio(contentMode: .fit).frame(width: 150)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    } else {
+                        WidgetThumb(item: item, size: size, width: 150, demo: !used)
+                    }
+                    if live { LiveBadge().padding(6).allowsHitTesting(false) }
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+                .opacity(used ? 1 : 0.55)
                 Button { c.toggle(kind) } label: {
                     Image(systemName: used ? "checkmark.circle.fill" : "plus.circle.fill")
                         .font(.system(size: 22)).symbolRenderingMode(.palette)
@@ -365,7 +527,7 @@ struct WidgetCard: View {
             }
             HStack(spacing: 6) {
                 Image(systemName: kind.symbol).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
-                Text(kind.title).font(.system(size: 14, weight: .semibold))
+                Text(kind.title).font(.system(size: 14, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.7)
             }
             Text(kind.subtitle).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
                 .frame(height: 30, alignment: .topLeading)
@@ -373,9 +535,31 @@ struct WidgetCard: View {
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .stroke(editing ? Color.accentColor : (used ? Color.accentColor.opacity(0.45) : Color.primary.opacity(0.07)),
-                    lineWidth: editing ? 2.5 : 1.5))
+            .stroke(editing ? Color.accentColor : (live ? Color(hex: "#2ED573") : (used ? Color.accentColor.opacity(0.45) : Color.primary.opacity(0.07))),
+                    lineWidth: editing || live ? 2.5 : 1.5))
+        .shadow(color: live ? Color(hex: "#2ED573").opacity(0.35) : .clear, radius: 10)
         .contentShape(Rectangle())
+    }
+}
+
+/// Punto parpadeante que indica «en directo».
+struct LiveDot: View {
+    @State private var on = false
+    var body: some View {
+        Circle().fill(Color(hex: "#FF4D4D")).frame(width: 8, height: 8).opacity(on ? 1 : 0.3)
+            .onAppear { withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { on = true } }
+    }
+}
+
+/// Etiqueta sobre la miniatura del widget que la pantalla está pintando ahora mismo.
+struct LiveBadge: View {
+    var body: some View {
+        HStack(spacing: 5) {
+            LiveDot()
+            Text("EN PANTALLA").font(.system(size: 9, weight: .heavy, design: .rounded)).tracking(0.6).foregroundStyle(.white)
+        }
+        .padding(.horizontal, 7).padding(.vertical, 4)
+        .background(Capsule().fill(Color.black.opacity(0.72)))
     }
 }
 
@@ -384,6 +568,10 @@ struct WidgetCard: View {
 struct WidgetSettings: View {
     @ObservedObject var c: ScreenController
     let item: WidgetItem
+    @State private var placeQuery = ""
+    @State private var placeResults: [WeatherPlace] = []
+    @State private var searching = false
+    @State private var searched = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -399,14 +587,9 @@ struct WidgetSettings: View {
                 TextField("Escribe tu mensaje", text: Binding(get: { item.text }, set: { v in c.update(.text) { $0.text = v } }), axis: .vertical)
                     .lineLimit(1...3).textFieldStyle(.roundedBorder)
             }
-            if item.kind == .photo {
-                HStack(spacing: 12) {
-                    Button { pickPhoto() } label: { Label(item.photoPath == nil ? "Elegir foto…" : "Cambiar foto…", systemImage: "photo") }
-                    if let p = item.photoPath {
-                        Text(URL(fileURLWithPath: p).lastPathComponent).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                }
-            }
+            if item.kind == .photo { photoSettings }
+            if item.kind == .weather { weatherSettings }
+            if item.kind == .news { newsSettings }
             if item.kind != .photo {
                 HStack(spacing: 10) {
                     Text("Color").font(.system(size: 13, weight: .medium))
@@ -425,11 +608,270 @@ struct WidgetSettings: View {
         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.primary.opacity(0.07)))
     }
 
+    // MARK: tiempo
+
+    @ViewBuilder private var weatherSettings: some View {
+        HStack(spacing: 8) {
+            TextField("Ciudad, por ejemplo Sevilla", text: $placeQuery)
+                .textFieldStyle(.roundedBorder).frame(maxWidth: 280).onSubmit { searchPlaces() }
+            Button("Buscar") { searchPlaces() }.disabled(placeQuery.trimmingCharacters(in: .whitespaces).count < 2)
+            if searching { ProgressView().controlSize(.small) }
+        }
+        if let p = item.weatherPlace {
+            Label(p.region.isEmpty ? p.name : "\(p.name) · \(p.region)", systemImage: "mappin.circle.fill")
+                .font(.system(size: 13, weight: .medium)).foregroundStyle(Color.accentColor)
+        } else {
+            Text("Busca tu ciudad y elígela de la lista. No hace falta dar permiso de ubicación.")
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+        }
+        if searched && placeResults.isEmpty && !searching {
+            Text("No he encontrado ninguna ciudad con ese nombre.").font(.system(size: 12)).foregroundStyle(.orange)
+        }
+        ForEach(placeResults, id: \.self) { r in
+            Button { choosePlace(r) } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "mappin.and.ellipse").foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(r.name).font(.system(size: 14, weight: .semibold))
+                        if !r.region.isEmpty { Text(r.region).font(.system(size: 12)).foregroundStyle(.secondary) }
+                    }
+                    Spacer()
+                    Text("Elegir").font(.system(size: 12, weight: .medium)).foregroundStyle(Color.accentColor)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 7).frame(maxWidth: 420)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.06)))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func searchPlaces() {
+        let q = placeQuery
+        searching = true; searched = false
+        Task {
+            let r = await DataHub.searchPlaces(q)
+            await MainActor.run { placeResults = r; searching = false; searched = true }
+        }
+    }
+
+    private func choosePlace(_ r: WeatherPlace) {
+        c.update(.weather) { $0.weatherPlace = r }
+        placeResults = []; placeQuery = ""; searched = false
+    }
+
+    // MARK: noticias
+
+    @ViewBuilder private var newsSettings: some View {
+        Text("Categorías").font(.system(size: 13, weight: .medium))
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 8)], alignment: .leading, spacing: 8) {
+            ForEach(NewsCategory.all) { cat in
+                let on = item.newsIDs.contains(cat.id)
+                Button { toggleCategory(cat.id) } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: on ? "checkmark.circle.fill" : cat.symbol).frame(width: 16)
+                        Text(cat.title).lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(on ? Color.accentColor : Color.primary)
+                    .padding(.horizontal, 11).padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(on ? Color.accentColor.opacity(0.15) : Color.primary.opacity(0.06)))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(on ? Color.accentColor.opacity(0.6) : .clear, lineWidth: 1.2))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        HStack(spacing: 10) {
+            Text("Cambiar de noticia cada").font(.system(size: 13, weight: .medium))
+            Slider(value: Binding(get: { Double(item.newsSlideSeconds) }, set: { v in c.update(.news) { $0.newsSeconds = Int(v) } }), in: 5...60, step: 1)
+                .frame(width: 200)
+            Text("\(item.newsSlideSeconds) s").monospacedDigit().foregroundStyle(.secondary).frame(width: 46, alignment: .trailing)
+        }
+        HStack(spacing: 10) {
+            Text("Fuente propia (RSS)").font(.system(size: 13, weight: .medium))
+            TextField("https://…/rss.xml", text: Binding(get: { item.newsCustomURL ?? "" }, set: { v in c.update(.news) { $0.newsCustomURL = v } }))
+                .textFieldStyle(.roundedBorder).frame(maxWidth: 340)
+        }
+        TimelineView(.periodic(from: .now, by: 2)) { ctx in
+            let r = DataHub.shared.news(for: item)
+            HStack(spacing: 12) {
+                Text(newsStatus(r, now: ctx.date)).font(.system(size: 12)).foregroundStyle(.secondary)
+                Button { DataHub.shared.refreshNews(for: item) } label: { Label("Actualizar ahora", systemImage: "arrow.clockwise") }
+                    .controlSize(.small)
+            }
+        }
+        Text("Las noticias se descargan de los feeds RSS públicos de cada medio y se renuevan cada hora.")
+            .font(.system(size: 11)).foregroundStyle(.tertiary)
+    }
+
+    private func newsStatus(_ r: NewsResult, now: Date) -> String {
+        if r.noSources { return "Elige alguna categoría." }
+        if r.items.isEmpty { return r.failed ? "No se pudieron descargar las noticias." : "Descargando noticias…" }
+        var t = "\(r.items.count) noticias"
+        if let u = r.updated {
+            let m = max(0, Int(now.timeIntervalSince(u) / 60))
+            t += m < 1 ? " · actualizadas ahora" : (m < 60 ? " · actualizadas hace \(m) min" : " · actualizadas hace \(m / 60) h")
+        }
+        return t
+    }
+
+    private func toggleCategory(_ id: String) {
+        var ids = item.newsIDs
+        if let i = ids.firstIndex(of: id) { ids.remove(at: i) } else { ids.append(id) }
+        c.update(.news) { $0.newsCategories = ids }
+    }
+
+    // MARK: foto o carpeta de fotos
+
+    @ViewBuilder private var photoSettings: some View {
+        Picker("", selection: Binding(get: { item.usesFolder }, set: { v in c.update(.photo) { $0.photoUsesFolder = v } })) {
+            Text("Una foto").tag(false)
+            Text("Carpeta (pase de fotos)").tag(true)
+        }
+        .labelsHidden().pickerStyle(.segmented).frame(maxWidth: 360)
+
+        if item.usesFolder {
+            HStack(spacing: 12) {
+                Button { pickFolder() } label: { Label(item.photoFolder == nil ? "Elegir carpeta…" : "Cambiar carpeta…", systemImage: "folder") }
+                if let f = item.photoFolder {
+                    let n = PhotoCache.files(in: f).count
+                    Text("\(URL(fileURLWithPath: f).lastPathComponent) · \(n) \(n == 1 ? "imagen" : "imágenes")")
+                        .font(.system(size: 12)).foregroundStyle(n == 0 ? Color.orange : Color.secondary).lineLimit(1)
+                }
+            }
+            HStack(spacing: 10) {
+                Text("Cambiar de foto cada").font(.system(size: 13, weight: .medium))
+                Slider(value: Binding(get: { Double(item.slideSeconds) }, set: { v in c.update(.photo) { $0.photoSeconds = Int(v) } }), in: 3...120, step: 1)
+                    .frame(width: 200)
+                Text("\(item.slideSeconds) s").monospacedDigit().foregroundStyle(.secondary).frame(width: 46, alignment: .trailing)
+            }
+            Toggle("Orden aleatorio", isOn: Binding(get: { item.shuffle }, set: { v in c.update(.photo) { $0.photoShuffle = v } }))
+                .toggleStyle(.switch).font(.system(size: 13))
+        } else {
+            HStack(spacing: 12) {
+                Button { pickPhoto() } label: { Label(item.photoPath == nil ? "Elegir foto…" : "Cambiar foto…", systemImage: "photo") }
+                if let p = item.photoPath {
+                    Text(URL(fileURLWithPath: p).lastPathComponent).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+        }
+        Toggle("Rellenar toda la pantalla (recorta los bordes)", isOn: Binding(get: { !item.fitInside }, set: { v in c.update(.photo) { $0.photoFit = !v } }))
+            .toggleStyle(.switch).font(.system(size: 13))
+    }
+
     private func pickPhoto() {
         let p = NSOpenPanel()
         p.allowedContentTypes = [.image]
         p.allowsMultipleSelection = false
         if p.runModal() == .OK, let url = p.url { c.update(.photo) { $0.photoPath = url.path } }
+    }
+
+    private func pickFolder() {
+        let p = NSOpenPanel()
+        p.canChooseFiles = false
+        p.canChooseDirectories = true
+        p.allowsMultipleSelection = false
+        p.prompt = "Elegir carpeta"
+        p.message = "Elige la carpeta con las fotos que quieres ir mostrando"
+        if p.runModal() == .OK, let url = p.url { c.update(.photo) { $0.photoFolder = url.path; $0.photoUsesFolder = true } }
+    }
+}
+
+// MARK: - Pantalla guardada sin conectar
+
+struct OfflineDetail: View {
+    let o: OfflineScreen
+    @EnvironmentObject var manager: ScreenManager
+    @State private var confirmForget = false
+
+    private var widgetsText: String { o.config.items.map { $0.kind.title }.joined(separator: ", ") }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                HStack(alignment: .firstTextBaseline, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        RenameField(name: o.config.name) { manager.rename(o.key, to: $0) }
+                        Text("ID \(o.key)").font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                    Spacer()
+                    HStack(spacing: 6) {
+                        Circle().fill(Color.gray).frame(width: 8, height: 8)
+                        Text("Sin conectar").font(.system(size: 12, weight: .medium))
+                    }
+                    .padding(.horizontal, 11).padding(.vertical, 6)
+                    .background(Capsule().fill(Color.gray.opacity(0.18)))
+                }
+
+                Text("Ahora mismo no hay ninguna pantalla en ese puerto USB, pero ScreenDeck guarda su configuración. Si has movido la pantalla a otro puerto, traslada aquí abajo su configuración a la que corresponda.")
+                    .font(.system(size: 14)).foregroundStyle(.secondary).frame(maxWidth: 620, alignment: .leading)
+
+                VStack(alignment: .leading, spacing: 0) {
+                    ControlRow(title: "Pantalla") { Text(o.config.isOn ? "Encendida" : "Apagada").foregroundStyle(.secondary) }
+                    Divider()
+                    ControlRow(title: "Brillo") { Text("\(o.config.brightness) %").monospacedDigit().foregroundStyle(.secondary) }
+                    Divider()
+                    ControlRow(title: "Orientación") { Text(o.config.orientation.title).foregroundStyle(.secondary) }
+                    Divider()
+                    ControlRow(title: o.config.items.count > 1 ? "Widgets (cada \(o.config.rotationSeconds) s)" : "Widget") {
+                        Text(widgetsText).foregroundStyle(.secondary).multilineTextAlignment(.trailing)
+                    }
+                }
+                .padding(18).frame(maxWidth: 520)
+                .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
+                .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.primary.opacity(0.07)))
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Usar esta configuración en…").font(.system(size: 20, weight: .bold, design: .rounded))
+                    if manager.screens.isEmpty {
+                        Text("Conecta una pantalla y aparecerá aquí para poder trasladarle esta configuración.")
+                            .font(.system(size: 13)).foregroundStyle(.secondary)
+                    } else {
+                        VStack(spacing: 8) {
+                            ForEach(manager.screens) { c in AdoptRow(c: c) { manager.adopt(o, into: c) } }
+                        }
+                        .frame(maxWidth: 520)
+                        Text("Se traslada el nombre, el brillo, la orientación y los widgets, y se sustituye lo que tuviera esa pantalla. Esta entrada guardada desaparece.")
+                            .font(.system(size: 12)).foregroundStyle(.secondary).frame(maxWidth: 520, alignment: .leading)
+                    }
+                }
+
+                Button(role: .destructive) { confirmForget = true } label: { Label("Olvidar esta pantalla", systemImage: "trash") }
+                    .controlSize(.small)
+            }
+            .padding(.top, 40).padding(.horizontal, 32).padding(.bottom, 40)
+        }
+        .confirmationDialog("¿Olvidar \(o.config.name)?", isPresented: $confirmForget, titleVisibility: .visible) {
+            Button("Olvidar", role: .destructive) { manager.forget(o) }
+            Button("Cancelar", role: .cancel) {}
+        } message: {
+            Text("Se borra su configuración guardada. Si vuelves a conectar una pantalla en ese puerto, empezará con la configuración por defecto.")
+        }
+    }
+}
+
+struct AdoptRow: View {
+    @ObservedObject var c: ScreenController
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Thumb(c: c).frame(width: 30, height: 44)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(c.config.name).font(.system(size: 14, weight: .semibold))
+                    IDBadge(key: c.key)
+                }
+                Spacer()
+                Text("Usar aquí").font(.system(size: 13, weight: .medium)).foregroundStyle(Color.accentColor)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color.primary.opacity(0.07)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -459,6 +901,6 @@ struct MenuContent: View {
 struct MenuScreenToggle: View {
     @ObservedObject var c: ScreenController
     var body: some View {
-        Toggle(c.config.name, isOn: $c.config.isOn)
+        Toggle("\(c.config.name) · \(c.key)", isOn: $c.config.isOn)
     }
 }
