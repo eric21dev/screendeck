@@ -10,8 +10,10 @@ App nativa para macOS que controla las pantallas USB **Turing Smart Screen de 3,
 
 - **Detecta las pantallas solas.** Una, dos o las que tengas: aparecen y desaparecen de la barra lateral al enchufarlas y desenchufarlas. No hay que configurar puertos.
 - **Vista previa en vivo** de lo que muestra cada pantalla, dentro de la propia app. En «Qué mostrar», la tarjeta del widget que la pantalla está pintando en ese momento lleva la etiqueta **EN PANTALLA** y muestra el fotograma exacto que se envía; si hay varios en rotación, se va moviendo de una a otra en directo, con una línea que dice cuánto falta para el siguiente.
-- **Doce widgets** que se adaptan a vertical y horizontal. Marca uno y queda fijo; marca varios y se alternan cada N segundos.
+- **Trece widgets** que se adaptan a vertical y horizontal. Marca uno y queda fijo; marca varios y se alternan cada N segundos.
 - **Ajustes por pantalla:** nombre (haz clic en él para cambiarlo), encendida/apagada, brillo, 4 orientaciones y color de cada widget. Se guardan aunque desconectes la pantalla y se recuerdan por **puerto USB**; el ID de cada una (por ejemplo `ID 2-1.4.1.3`) se ve junto a su nombre.
+- **Orden y duración de la rotación:** con varios widgets, los ordenas arrastrando y cada uno puede durar lo suyo (por ejemplo 20 s el reloj y 5 s la red).
+- **Se apaga con el Mac:** las pantallas se apagan al bloquear la sesión, al apagarse las pantallas del Mac o al suspenderlo, y se encienden al volver (se puede desactivar).
 - **Orden a tu gusto:** arrastra las pantallas en la barra lateral para ordenarlas (o clic derecho → «Mover arriba» / «Mover abajo»). El orden se guarda, y una pantalla desconectada **conserva su sitio**: no salta al final ni queda siempre detrás de las conectadas.
 - **Pantallas guardadas:** las que no están conectadas se quedan en la misma lista, atenuadas y con «Sin conectar». Si has movido una pantalla a otro puerto, le trasladas su configuración con un clic (la pantalla de destino ocupa su sitio), o la olvidas.
 - **Icono en la barra de menús** para encender o apagar cada pantalla sin abrir la ventana. Cerrar la ventana no detiene las pantallas.
@@ -84,6 +86,17 @@ En horizontal se reorganizan, no se estiran:
 | **Procesos** | Las 5 apps que más **CPU** y las 5 que más **memoria** usan, con su icono. Los procesos auxiliares se suman a su app (Chrome y sus «Helper» cuentan como uno) | Color |
 | **GPU y temperatura** | Uso de la GPU con gráfica, temperaturas (CPU, GPU, SSD, batería, las que dé tu Mac) y estado térmico de macOS | Color |
 | **Noticias** | Titular y resumen de la noticia, con la categoría y la fuente, cuánto hace de ella y una barra hasta la siguiente | Categorías, intervalo, fuente RSS propia y color |
+| **Panel** | Varias secciones pequeñas en una sola pantalla: hora, tiempo, CPU, memoria, disco, red, batería, GPU o temperatura | Distribución, qué va en cada bloque y ciudad |
+
+#### Panel
+
+Para ver varias cosas de un vistazo sin rotar. Eliges la **distribución** (3 bloques, 4 bloques o uno grande y dos pequeños) y **qué va en cada bloque**: Reloj, Tiempo, CPU, Memoria, Disco, Red, Batería, GPU o Temperatura. Los bloques se adaptan a su tamaño y a la orientación de la pantalla. Si pones un bloque de Tiempo, eliges su ciudad en los mismos ajustes.
+
+![Ajustes del Panel](docs/images/ajustes-panel.png)
+
+![Panel en vertical](docs/images/widgets-panel-vertical.png)
+
+![Panel en horizontal](docs/images/widgets-panel-horizontal.png)
 
 #### Tiempo
 
@@ -142,8 +155,9 @@ Solo compilar, sin instalar: `./build.sh` deja la app en `build/ScreenDeck.app`.
 3. **Pulsa una tarjeta** para abrir sus ajustes: color, texto del mensaje o foto. En **Foto**, elige «Carpeta (pase de fotos)» para que vaya rotando todas las imágenes de una carpeta.
 4. **Ponle nombre** a cada pantalla: haz clic en el nombre de la cabecera (el lápiz indica que se puede editar), o clic derecho sobre ella en la barra lateral → «Renombrar…». También las que están sin conectar. Intro o salir del campo guarda el cambio; hasta 40 caracteres.
 5. **Ordénalas** arrastrando una sobre otra en la barra lateral. Se mantiene el orden aunque desenchufes alguna.
-6. **Ajusta** brillo y orientación. Con varias pantallas, «Copiar a las demás» replica la selección y el brillo.
-7. **Marca «Abrir al iniciar sesión»** en la barra lateral si quieres que arranque con el Mac.
+6. **Ordena y dura:** con varios widgets marcados aparece «Orden y duración»: arrastra para cambiar el orden y elige cuánto dura cada uno (o «General»).
+7. **Ajusta** brillo y orientación. Con varias pantallas, «Copiar a las demás» replica la selección y el brillo.
+8. **Marca «Abrir al iniciar sesión»** en la barra lateral si quieres que arranque con el Mac.
 
 ## Cómo reconoce cada pantalla
 
@@ -184,6 +198,7 @@ Más detalles en [docs/PROTOCOLO.md](docs/PROTOCOLO.md).
 | `Sources/Sensors.swift` | Lectores de volúmenes, procesos (`ps`), GPU (IOKit) y temperaturas (sensores de Apple Silicon) |
 | `Sources/Services.swift` | Tiempo (Open-Meteo), lector de feeds RSS/Atom y caché de ambos |
 | `Sources/Widgets2.swift` | Los widgets de datos: Tiempo, Discos, Procesos, GPU y temperatura, Noticias |
+| `Sources/Panel.swift` | El widget Panel: distribuciones y bloques |
 | `Sources/UI.swift` · `App.swift` | Ventana, barra lateral, galería, icono de la barra de menús |
 | `Sources/CLibUSB/` | Módulo que importa libusb en Swift |
 | `build.sh` · `install.sh` · `release.sh` | Compilar, instalar y generar el DMG |
@@ -200,6 +215,16 @@ Cada segundo, cada pantalla renderiza su widget a una imagen con `ImageRenderer`
 
 **macOS dice que la app «no se puede abrir».** Es el aviso de Gatekeeper por no estar notarizada: sigue los pasos de [Instalar con el DMG](#instalar-con-el-dmg-sin-compilar).
 
+## Apagar con el Mac
+
+En la barra lateral, **«Apagar al bloquear o suspender el Mac»** (activado por defecto) apaga las pantallas cuando:
+
+- se **bloquea la sesión** (menú Apple → Bloquear pantalla, o Ctrl+Cmd+Q),
+- se **apagan las pantallas** del Mac por inactividad,
+- el Mac se **suspende**, o se cambia de usuario.
+
+Al volver se encienden solas, con el brillo y la orientación de cada una. Tras despertar de la suspensión se reconectan, porque el USB puede haberse reiniciado. Se apagan por comando (no se corta la corriente), y al volver se redibuja lo que tocaba. Si lo desactivas, las pantallas siguen mostrando lo suyo con el Mac bloqueado.
+
 ## Estado y límites
 
 - Probada con **MacBook Pro (M4 Pro)** y macOS 26, con una y con dos pantallas a la vez. No he probado Intel ni macOS 15 en un Mac real.
@@ -210,6 +235,7 @@ Cada segundo, cada pantalla renderiza su widget a una imagen con `ImageRenderer`
 - **Discos:** solo volúmenes locales (los de red no se muestran, para no bloquear la app si se cuelgan).
 - **Noticias:** dependen de que los feeds públicos de cada medio sigan existiendo; si alguno cambia o desaparece, se puede sustituir con «Fuente propia (RSS)».
 - **Baterías:** salen las que macOS publica: la del Mac y los accesorios conectados que informan de su batería (`pmset -g accps`, dispositivos HID y la lista de Bluetooth). No salen iPhone, iPad ni Apple Watch. Los AirPods y auriculares aparecen solo mientras estén conectados al Mac, con izquierdo, derecho y estuche cuando macOS los da; **esa parte no la he podido probar con auriculares conectados**. Se actualizan cada pocos segundos (la lista de Bluetooth, cada minuto).
+- **Apagar con el Mac:** el bloqueo de sesión se detecta con las notificaciones `com.apple.screenIsLocked` y `screenIsUnlocked`, muy usadas pero que Apple no documenta; el apagado por suspensión, por pantallas dormidas y por cambio de usuario usa notificaciones públicas. Lo he probado simulando el bloqueo y el desbloqueo; no he probado una suspensión real del Mac.
 - **Procesos:** la memoria es la residente de cada app (RSS), que no coincide exactamente con la columna «Memoria» del Monitor de Actividad.
 
 ## Desarrollo
@@ -218,6 +244,8 @@ Cada segundo, cada pantalla renderiza su widget a una imagen con `ImageRenderer`
 ./build.sh                                                            # build/ScreenDeck.app
 build/ScreenDeck.app/Contents/MacOS/ScreenDeck --snapshot  /ruta      # PNG de cada widget, vertical y horizontal (sin tocar las pantallas)
 build/ScreenDeck.app/Contents/MacOS/ScreenDeck --screenshots /ruta    # capturas de la ventana (las de este README)
+build/ScreenDeck.app/Contents/MacOS/ScreenDeck --selftest-rotation     # prueba el orden y la duración de la rotación (sin pantallas)
+build/ScreenDeck.app/Contents/MacOS/ScreenDeck --selftest-sleep         # simula bloquear y desbloquear; las pantallas se apagan unos segundos
 build/ScreenDeck.app/Contents/MacOS/ScreenDeck --selftest              # lee discos, procesos, GPU y temperaturas de este Mac y descarga tiempo y noticias
 ```
 

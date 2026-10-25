@@ -34,6 +34,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
             return
         }
+        if args.contains("--selftest-rotation") {
+            Store.disabled = true
+            selfTestRotation()
+            NSApp.terminate(nil)
+            return
+        }
+        if args.contains("--selftest-sleep") {
+            Store.disabled = true
+            ScreenManager.shared.start()
+            selfTestSleep()
+            return
+        }
         if args.contains("--selftest") {
             selfTest()
             NSApp.terminate(nil)
@@ -54,6 +66,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         ScreenManager.shared.screens.forEach { $0.stop() }
+    }
+
+    /// Prueba la rotación con duraciones propias y el cambio de orden (sin pantallas).
+    private func selfTestRotation() {
+        let c = ScreenController(key: "prueba", config: ScreenConfig(name: "prueba"))
+        var cfg = c.config
+        cfg.rotationSeconds = 8
+        var sys = WidgetItem(kind: .system); sys.seconds = 3
+        var net = WidgetItem(kind: .network); net.seconds = 5
+        cfg.items = [WidgetItem(kind: .clock), sys, net]
+        c.config = cfg
+        func letter(_ k: WidgetKind) -> String { String(k.rawValue.prefix(1)).uppercased() }
+        func sequence(_ n: Int) -> String {
+            let base = 1_800_000_000        // múltiplo de 16 = 8 + 3 + 5
+            return (0..<n).map { i -> String in
+                guard let it = c.currentItem(at: Date(timeIntervalSince1970: Double(base + i))) else { return "-" }
+                return letter(it.kind)
+            }.joined().replacingOccurrences(of: "(?<=(.))(?!\\1)", with: "|", options: .regularExpression)
+        }
+        func order() -> String { c.config.items.map { "\($0.kind.rawValue)(\($0.seconds.map { "\($0)s" } ?? "gen"))" }.joined(separator: " → ") }
+        line("orden:  " + order())
+        line("32 s:   " + sequence(32) + "    (reloj 8 · sistema 3 · red 5, y se repite)")
+        let s0 = c.slot(at: Date(timeIntervalSince1970: 1_800_000_009))
+        line("a los 9 s: widget \(s0.map { c.config.items[$0.index].kind.rawValue } ?? "-"), lleva \(s0?.elapsed ?? -1) s de \(s0?.duration ?? -1), faltan \(s0?.remaining ?? -1)")
+        c.moveItem(.network, onto: .clock)
+        line("mover red sobre reloj:     " + order())
+        c.moveItemBy(.system, -1)
+        line("subir sistema:             " + order())
+        c.setSeconds(.system, nil)
+        line("sistema → duración general: " + order())
+        c.toggle(.battery)
+        line("añadir energía:            " + order() + "   (al final, sin reordenar)")
+        c.toggle(.clock)
+        line("quitar reloj:              " + order())
+    }
+
+    /// Prueba el apagado con el Mac: simula bloquear y desbloquear la sesión y comprueba el estado de cada pantalla.
+    /// Las pantallas se apagan unos segundos de verdad.
+    private func selfTestSleep() {
+        let m = ScreenManager.shared
+        func state() -> String { m.screens.map { "\($0.config.name)=\($0.suspended ? "apagada por el Mac" : "normal")" }.joined(separator: ", ") }
+        let dn = DistributedNotificationCenter.default()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+            line("1. antes de bloquear:   " + state() + "  | apagar con el Mac: \(m.sleepWithMac)")
+            dn.postNotificationName(Notification.Name("com.apple.screenIsLocked"), object: nil, userInfo: nil, deliverImmediately: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                line("2. bloqueado:           " + state())
+                m.sleepWithMac = false
+                line("3. opción desactivada:  " + state())
+                m.sleepWithMac = true
+                line("4. opción activada:     " + state())
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                    dn.postNotificationName(Notification.Name("com.apple.screenIsUnlocked"), object: nil, userInfo: nil, deliverImmediately: true)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                        line("5. desbloqueado:        " + state())
+                        NSApp.terminate(nil)
+                    }
+                }
+            }
+        }
     }
 
     /// Modo de pruebas: lee los sensores de este Mac y descarga tiempo y noticias de verdad, e imprime lo que obtiene.
@@ -106,7 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for kind in WidgetKind.allCases {
             for o in [ScreenOrientation.portrait, .landscape] {
                 var item = WidgetItem(kind: kind)
-                if kind == .weather { item.weatherPlace = WeatherPlace(name: "Madrid", region: "Comunidad de Madrid · España", latitude: 40.4, longitude: -3.7) }
+                if kind == .weather || kind == .panel { item.weatherPlace = WeatherPlace(name: "Madrid", region: "Comunidad de Madrid · España", latitude: 40.4, longitude: -3.7) }
                 if kind == .text { item.text = "Buenos días ☀️" }
                 if kind == .photo { item.photoPath = ProcessInfo.processInfo.environment["SCREENDECK_DEMO_PHOTO"] }
                 let (w, h) = o.pixelSize
@@ -114,6 +186,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let rep = NSBitmapImageRep(cgImage: cg)
                 try? rep.representation(using: .png, properties: [:])?
                     .write(to: URL(fileURLWithPath: "\(dir)/\(kind.rawValue)-\(o.isPortrait ? "v" : "h").png"))
+            }
+        }
+        // Las tres distribuciones del Panel
+        for layout in PanelLayout.allCases {
+            for o in [ScreenOrientation.portrait, .landscape] {
+                var item = WidgetItem(kind: .panel)
+                item.weatherPlace = WeatherPlace(name: "Madrid", region: "", latitude: 40.4, longitude: -3.7)
+                item.panelLayout = layout.rawValue
+                if layout == .grid { item.panelTiles = ["clock", "weather", "cpu", "network"] }
+                if layout == .rows { item.panelTiles = ["clock", "cpu", "network"] }
+                if layout == .hero { item.panelTiles = ["clock", "memory", "battery"] }
+                let (w, h) = o.pixelSize
+                guard let cg = Renderer.image(item, snap: .demo, date: Date(), size: CGSize(width: w, height: h)) else { continue }
+                try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?
+                    .write(to: URL(fileURLWithPath: "\(dir)/panel-\(layout.rawValue)-\(o.isPortrait ? "v" : "h").png"))
             }
         }
         // Prueba del pase de fotos: SCREENDECK_DEMO_FOLDER=/carpeta [SCREENDECK_DEMO_SHUFFLE=1]
@@ -159,17 +246,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             off.orderOut(nil)
         }
 
+        /// Solo el panel de ajustes de un widget, a su tamaño (para las imágenes del README).
+        func saveSettings(_ name: String, item: WidgetItem, width: CGFloat) {
+            guard let c = ScreenManager.shared.screens.first else { return }
+            let host = NSHostingView(rootView: WidgetSettings(c: c, item: item).environmentObject(ScreenManager.shared)
+                .frame(width: width).padding(18).background(Color(nsColor: .windowBackgroundColor)))
+            host.frame = NSRect(x: 0, y: 0, width: width + 36, height: 3000)
+            let off = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            off.contentView = host
+            off.setFrameOrigin(NSPoint(x: -6000, y: -6000))
+            off.orderBack(nil)
+            host.layoutSubtreeIfNeeded()
+            host.frame = NSRect(origin: .zero, size: NSSize(width: width + 36, height: host.fittingSize.height))
+            RunLoop.main.run(until: Date().addingTimeInterval(1.5))
+            host.layoutSubtreeIfNeeded()
+            if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                host.cacheDisplay(in: host.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
+                print("Captura \(name).png")
+            }
+            off.orderOut(nil)
+        }
+
         func configure(_ step: Int) {
             guard let c = ScreenManager.shared.screens.first else { return }
             if step == 1 {
                 c.config.orientation = .portrait
-                c.config.items = [WidgetItem(kind: .clock), WidgetItem(kind: .system), WidgetItem(kind: .network)]
+                var clock = WidgetItem(kind: .clock); clock.seconds = 15
+                var net = WidgetItem(kind: .network); net.seconds = 5
+                c.config.items = [clock, WidgetItem(kind: .system), net]
                 c.editingKind = .system
             } else if step == 2 {
                 c.config.orientation = .landscape
                 var t = WidgetItem(kind: .text); t.text = "¡Buenos días!"
                 c.config.items = [WidgetItem(kind: .calendar), t]
                 c.editingKind = .text
+            } else if step == 5 {
+                c.config.orientation = .portrait
+                var p = WidgetItem(kind: .panel)
+                p.weatherPlace = WeatherPlace(name: "Sevilla", region: "Andalucía · España", latitude: 37.38283, longitude: -5.97317)
+                p.panelLayout = "grid"; p.panelTiles = ["clock", "weather", "cpu", "network"]
+                c.config.items = [p, WidgetItem(kind: .system)]
+                c.editingKind = .panel
             } else {
                 c.config.orientation = .portrait
                 var w = WidgetItem(kind: .weather)
@@ -191,9 +309,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
                         save("ventana-noticias", height: 2000)
                         configure(4)
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { save("ventana-tiempo", height: 2000) }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                            save("ventana-tiempo", height: 2000)
+                            configure(5)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { save("ventana-panel", height: 2000)
+                                if let p = ScreenManager.shared.screens.first?.config.items.first(where: { $0.kind == .panel }) {
+                                    saveSettings("ajustes-panel", item: p, width: 900)
+                                }
+                            }
+                        }
                     }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 22) {
                     // Pantallas guardadas sin conectar: captura y prueba de «trasladar» y «olvidar» (en memoria)
                     let m = ScreenManager.shared
                     print("guardadas sin conectar: \(m.offline.map { "\($0.config.name) [\($0.key)]" })")

@@ -149,6 +149,7 @@ struct WidgetCanvas: View {
         case .processes: ProcessesWidget(item: item, snap: snap, date: date, size: size)
         case .thermal: ThermalWidget(item: item, snap: snap, date: date, size: size)
         case .news: NewsWidget(item: item, date: date, size: size, demo: demo)
+        case .panel: PanelWidget(item: item, snap: snap, date: date, size: size, demo: demo)
         }
     }
 }

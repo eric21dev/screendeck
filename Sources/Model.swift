@@ -5,7 +5,7 @@ import AppKit
 
 enum WidgetKind: String, Codable, CaseIterable, Identifiable {
     case clock, system, network, battery, calendar, text, photo
-    case weather, disks, processes, thermal, news
+    case weather, disks, processes, thermal, news, panel
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -21,6 +21,7 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .processes: return "Procesos"
         case .thermal: return "GPU y temperatura"
         case .news: return "Noticias"
+        case .panel: return "Panel"
         }
     }
     var subtitle: String {
@@ -37,6 +38,7 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .processes: return "Lo que más CPU y memoria usa"
         case .thermal: return "Uso de la GPU y temperaturas"
         case .news: return "Titulares y resúmenes que van pasando"
+        case .panel: return "Varias secciones en una sola pantalla"
         }
     }
     var symbol: String {
@@ -53,6 +55,7 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .processes: return "chart.bar.fill"
         case .thermal: return "thermometer.medium"
         case .news: return "newspaper.fill"
+        case .panel: return "square.grid.2x2.fill"
         }
     }
     var defaultAccent: String {
@@ -69,6 +72,7 @@ enum WidgetKind: String, Codable, CaseIterable, Identifiable {
         case .processes: return "#FF5C8A"
         case .thermal: return "#FF7A59"
         case .news: return "#7C5CFF"
+        case .panel: return "#34C8FF"
         }
     }
 }
@@ -85,8 +89,13 @@ struct WidgetItem: Codable, Identifiable, Hashable {
     var photoSeconds: Int?
     var photoShuffle: Bool?
     var photoFit: Bool?
+    /// Segundos que dura este widget en la rotación; si no hay, se usa el general de la pantalla.
+    var seconds: Int?
     // Tiempo
     var weatherPlace: WeatherPlace?
+    // Panel
+    var panelLayout: String?
+    var panelTiles: [String]?
     // Noticias
     var newsCategories: [String]?
     var newsCustomURL: String?
@@ -214,6 +223,8 @@ final class ScreenController: ObservableObject, Identifiable {
     private var timer: Timer?
     private var brightnessWork: DispatchWorkItem?
     private var failures = 0
+    /// La pantalla está apagada por el Mac (bloqueado, suspendido…), aunque en la configuración siga encendida.
+    private(set) var suspended = false
     var onChange: ((String, ScreenConfig) -> Void)?
 
     init(key: String, config: ScreenConfig) {
@@ -243,11 +254,13 @@ final class ScreenController: ObservableObject, Identifiable {
         status = .connecting
         let cfg = config
         let key = key
+        let sus = suspended
         queue.async { [weak self] in
             let l = TuringLink(key: key)
             var ok = false
             if let l {
                 ok = l.screenOn() && l.setOrientation(cfg.orientation) && l.setBrightness(cfg.brightness)
+                if ok && (sus || !cfg.isOn) { l.screenOff() }
             }
             Task { @MainActor in
                 guard let self else { return }
@@ -299,22 +312,66 @@ final class ScreenController: ObservableObject, Identifiable {
         if config.isOn != old.isOn {
             let on = config.isOn
             let l = link
+            let sus = suspended
             queue.async {
                 guard let l else { return }
-                if on { l.screenOn(); l.forgetFrame() } else { l.screenOff() }
+                if on { if !sus { l.screenOn(); l.forgetFrame() } } else { l.screenOff() }
             }
         }
     }
 
+    // MARK: apagar con el Mac
+
+    /// Apaga o enciende la pantalla porque el Mac se bloquea, se suspende o apaga sus pantallas.
+    func setSuspended(_ s: Bool) {
+        guard s != suspended else { return }
+        suspended = s
+        let l = link, on = config.isOn, b = config.brightness, o = config.orientation
+        queue.async {
+            guard let l else { return }
+            if s { l.screenOff() } else if on { l.screenOn(); l.setOrientation(o); l.setBrightness(b); l.forgetFrame() }
+        }
+        if !s { tick() }
+    }
+
+    /// Para una pantalla que aparece cuando el Mac ya está bloqueado o dormido.
+    func startSuspended() { suspended = true }
+
+    /// Tras despertar el USB puede haberse reiniciado: se abre la conexión de nuevo.
+    func reconnect() {
+        let old = link
+        link = nil; linkReady = false
+        queue.async { _ = old }
+        connect()
+    }
+
     // MARK: render + envío
 
-    func currentItem(at date: Date = Date()) -> WidgetItem? {
+    /// Cuánto dura un widget en la rotación: lo suyo o el valor general.
+    func duration(of item: WidgetItem) -> Int { max(2, item.seconds ?? config.rotationSeconds) }
+
+    struct Slot {
+        var index: Int          // posición del widget en la lista
+        var elapsed: Int        // segundos que lleva en pantalla
+        var duration: Int       // segundos que dura
+        var remaining: Int { duration - elapsed }
+    }
+
+    /// Qué widget toca en `date`. Depende solo de la hora, así que no hay que guardar ningún estado.
+    func slot(at date: Date = Date()) -> Slot? {
         let items = config.items
         guard !items.isEmpty else { return nil }
-        if items.count == 1 { return items[0] }
-        let step = max(2, config.rotationSeconds)
-        return items[Int(date.timeIntervalSince1970) / step % items.count]
+        if items.count == 1 { return Slot(index: 0, elapsed: 0, duration: duration(of: items[0])) }
+        let durations = items.map(duration(of:))
+        var r = Int(date.timeIntervalSince1970) % durations.reduce(0, +)
+        for (i, d) in durations.enumerated() {
+            if r < d { return Slot(index: i, elapsed: r, duration: d) }
+            r -= d
+        }
+        return nil
     }
+
+    func currentItem(at date: Date = Date()) -> WidgetItem? { slot(at: date).map { config.items[$0.index] } }
 
     func tick() {
         let now = Date()
@@ -323,7 +380,7 @@ final class ScreenController: ObservableObject, Identifiable {
         currentKind = item.kind
         guard let cg = Renderer.image(item, snap: SystemStats.shared.snapshot, date: now, size: CGSize(width: w, height: h)) else { return }
         preview = NSImage(cgImage: cg, size: NSSize(width: w, height: h))
-        guard config.isOn, linkReady, !busy, let link else { return }
+        guard config.isOn, !suspended, linkReady, !busy, let link else { return }
         guard let frame = Renderer.rgb565(cg, width: w, height: h) else { return }
         busy = true
         queue.async { [weak self] in
@@ -348,17 +405,35 @@ final class ScreenController: ObservableObject, Identifiable {
         if let i = config.items.firstIndex(where: { $0.kind == kind }) {
             if config.items.count > 1 { config.items.remove(at: i) }   // siempre queda al menos una
         } else {
-            config.items.append(WidgetItem(kind: kind))
-            config.items.sort { order($0.kind) < order($1.kind) }
+            config.items.append(WidgetItem(kind: kind))     // al final: el usuario decide el orden
         }
     }
+
+    // MARK: orden y duración de la rotación
+
+    func moveItem(_ kind: WidgetKind, onto target: WidgetKind) {
+        guard kind != target, let from = config.items.firstIndex(where: { $0.kind == kind }),
+              let to = config.items.firstIndex(where: { $0.kind == target }) else { return }
+        var items = config.items
+        let it = items.remove(at: from)
+        items.insert(it, at: to)
+        config.items = items
+    }
+
+    func moveItemBy(_ kind: WidgetKind, _ delta: Int) {
+        guard let i = config.items.firstIndex(where: { $0.kind == kind }), config.items.indices.contains(i + delta) else { return }
+        var items = config.items
+        items.swapAt(i, i + delta)
+        config.items = items
+    }
+
+    func setSeconds(_ kind: WidgetKind, _ seconds: Int?) { update(kind) { $0.seconds = seconds } }
 
     func useOnly(_ kind: WidgetKind) {
         let existing = config.items.first { $0.kind == kind } ?? WidgetItem(kind: kind)
         config.items = [existing]
     }
 
-    private func order(_ k: WidgetKind) -> Int { WidgetKind.allCases.firstIndex(of: k) ?? 0 }
 
     func update(_ kind: WidgetKind, _ change: (inout WidgetItem) -> Void) {
         guard let i = config.items.firstIndex(where: { $0.kind == kind }) else { return }
@@ -408,10 +483,21 @@ final class ScreenManager: ObservableObject {
 
     private var saved = Store.load()
     private var timer: Timer?
+    private var suspendReasons: Set<String> = []
+    private var observing = false
+
+    /// Apagar las pantallas cuando el Mac se bloquea o se suspende, y encenderlas al volver.
+    @Published var sleepWithMac: Bool = (UserDefaults.standard.object(forKey: "sleepWithMac") as? Bool) ?? true {
+        didSet {
+            if !Store.disabled { UserDefaults.standard.set(sleepWithMac, forKey: "sleepWithMac") }
+            applySuspension()
+        }
+    }
 
     func start() {
         guard timer == nil else { return }
         SystemStats.shared.start()
+        observeSystem()
         scan()
         refreshOffline()
         syncOrder()
@@ -449,6 +535,7 @@ final class ScreenManager: ObservableObject {
             let cfg = saved[k] ?? ScreenConfig(name: nextName())
             if saved[k] == nil { saved[k] = cfg; persist() }
             let c = ScreenController(key: k, config: cfg)
+            if sleepWithMac && !suspendReasons.isEmpty { c.startSuspended() }
             c.onChange = { [weak self] key, cfg in self?.saved[key] = cfg; self?.persist() }
             screens.append(c)
             c.start()
@@ -468,6 +555,53 @@ final class ScreenManager: ObservableObject {
             s.config.items = source.config.items
             s.config.rotationSeconds = source.config.rotationSeconds
             s.config.brightness = source.config.brightness
+        }
+    }
+
+    // MARK: bloqueo y suspensión
+
+    var isSuspended: Bool { sleepWithMac && !suspendReasons.isEmpty }
+
+    func setReason(_ reason: String, _ active: Bool) {
+        if active { suspendReasons.insert(reason) } else { suspendReasons.remove(reason) }
+        applySuspension()
+    }
+
+    private func applySuspension() {
+        let s = isSuspended
+        screens.forEach { $0.setSuspended(s) }
+    }
+
+    /// Escucha cuándo el Mac se duerme, apaga las pantallas, se bloquea o cambia de usuario.
+    private func observeSystem() {
+        guard !observing else { return }
+        observing = true
+        let ws = NSWorkspace.shared.notificationCenter
+        func watch(_ name: Notification.Name, center: NotificationCenter, reason: String, active: Bool, wake: Bool = false) {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    self?.setReason(reason, active)
+                    if wake { self?.afterWake() }
+                }
+            }
+        }
+        watch(NSWorkspace.willSleepNotification, center: ws, reason: "sleep", active: true)
+        watch(NSWorkspace.didWakeNotification, center: ws, reason: "sleep", active: false, wake: true)
+        watch(NSWorkspace.screensDidSleepNotification, center: ws, reason: "displays", active: true)
+        watch(NSWorkspace.screensDidWakeNotification, center: ws, reason: "displays", active: false)
+        watch(NSWorkspace.sessionDidResignActiveNotification, center: ws, reason: "session", active: true)
+        watch(NSWorkspace.sessionDidBecomeActiveNotification, center: ws, reason: "session", active: false)
+        let dn = DistributedNotificationCenter.default()
+        watch(Notification.Name("com.apple.screenIsLocked"), center: dn, reason: "lock", active: true)
+        watch(Notification.Name("com.apple.screenIsUnlocked"), center: dn, reason: "lock", active: false)
+    }
+
+    /// Al despertar, el USB tarda en volver: se reconectan las pantallas pasados unos segundos.
+    private func afterWake() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self else { return }
+            self.scan()
+            self.screens.forEach { $0.reconnect() }
         }
     }
 

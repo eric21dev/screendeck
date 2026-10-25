@@ -115,6 +115,9 @@ struct Sidebar: View {
                         Button("Encender todas") { manager.setAll(on: true) }
                     }.controlSize(.small)
                 }
+                Toggle("Apagar al bloquear o suspender el Mac", isOn: $manager.sleepWithMac)
+                    .toggleStyle(.checkbox).font(.system(size: 12)).foregroundStyle(.secondary)
+                    .help("Las pantallas se apagan cuando se bloquea la sesión, se apagan las pantallas del Mac o se suspende, y se encienden al volver.")
                 Toggle("Abrir al iniciar sesión", isOn: $launchAtLogin)
                     .toggleStyle(.checkbox).font(.system(size: 12)).foregroundStyle(.secondary)
                     .onChange(of: launchAtLogin) { on in
@@ -300,6 +303,7 @@ struct ScreenDetail: View {
                     DevicePreview(c: c)
                     controls
                 }
+                if c.config.items.count > 1 { RotationList(c: c) }
                 gallery
                 if let k = c.editingKind, let item = c.config.items.first(where: { $0.kind == k }) {
                     WidgetSettings(c: c, item: item)
@@ -344,7 +348,7 @@ struct ScreenDetail: View {
             }
             if c.config.items.count > 1 {
                 Divider()
-                ControlRow(title: "Cambiar cada") {
+                ControlRow(title: "Cada widget dura") {
                     HStack(spacing: 8) {
                         Slider(value: Binding(get: { Double(c.config.rotationSeconds) }, set: { c.config.rotationSeconds = Int($0) }), in: 3...60, step: 1)
                             .frame(width: 130)
@@ -374,8 +378,7 @@ struct ScreenDetail: View {
     @ViewBuilder private var liveLine: some View {
         TimelineView(.periodic(from: .now, by: 1)) { ctx in
             if c.config.isOn, c.status == .ready, let k = c.currentKind {
-                let step = max(2, c.config.rotationSeconds)
-                let left = step - Int(ctx.date.timeIntervalSince1970) % step
+                let left = c.slot(at: ctx.date)?.remaining ?? 0
                 HStack(spacing: 7) {
                     LiveDot()
                     (Text("En pantalla ahora: ") + Text(k.title).bold().foregroundColor(.primary)
@@ -542,6 +545,119 @@ struct WidgetCard: View {
     }
 }
 
+/// Lista de los widgets en rotación: se ordena arrastrando y cada uno puede durar lo suyo.
+struct RotationList: View {
+    @ObservedObject var c: ScreenController
+    @State private var dropTarget: WidgetKind?
+    static let prefix = "screendeck-widget:"
+    private let options = [3, 5, 8, 10, 15, 20, 30, 45, 60, 90, 120]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Orden y duración").font(.system(size: 20, weight: .bold, design: .rounded))
+                Text("Arrastra para cambiar el orden. Cada widget puede durar lo suyo; si no, se usa el general (\(c.config.rotationSeconds) s).")
+                    .font(.system(size: 13)).foregroundStyle(.secondary)
+            }
+            TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                let slot = (c.config.isOn && c.status == .ready) ? c.slot(at: ctx.date) : nil
+                VStack(spacing: 6) {
+                    ForEach(Array(c.config.items.enumerated()), id: \.element.id) { i, it in
+                        row(i, it, live: slot?.index == i ? slot : nil)
+                    }
+                }
+            }
+            .frame(maxWidth: 560)
+        }
+    }
+
+    private func row(_ i: Int, _ it: WidgetItem, live: ScreenController.Slot?) -> some View {
+        let green = Color(hex: "#2ED573")
+        return HStack(spacing: 10) {
+            Image(systemName: "line.3.horizontal").font(.system(size: 12, weight: .semibold)).foregroundStyle(.tertiary)
+            Image(systemName: it.kind.symbol).font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary).frame(width: 20)
+            Text(it.kind.title).font(.system(size: 14, weight: .semibold))
+            if live != nil {
+                LiveDot()
+                Text("EN PANTALLA").font(.system(size: 9, weight: .heavy, design: .rounded)).tracking(0.6).foregroundStyle(green)
+            }
+            Spacer(minLength: 6)
+            Menu {
+                Button("General (\(c.config.rotationSeconds) s)") { c.setSeconds(it.kind, nil) }
+                Divider()
+                ForEach(options, id: \.self) { s in Button("\(s) s") { c.setSeconds(it.kind, s) } }
+            } label: {
+                Text(it.seconds.map { "\($0) s" } ?? "General (\(c.config.rotationSeconds) s)")
+                    .font(.system(size: 12, weight: .medium)).monospacedDigit()
+            }
+            .menuStyle(.borderlessButton).fixedSize()
+            Button { c.moveItemBy(it.kind, -1) } label: { Image(systemName: "chevron.up") }
+                .buttonStyle(.plain).disabled(i == 0).foregroundStyle(i == 0 ? Color.secondary.opacity(0.3) : Color.secondary)
+            Button { c.moveItemBy(it.kind, 1) } label: { Image(systemName: "chevron.down") }
+                .buttonStyle(.plain).disabled(i == c.config.items.count - 1)
+                .foregroundStyle(i == c.config.items.count - 1 ? Color.secondary.opacity(0.3) : Color.secondary)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(
+            GeometryReader { g in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(nsColor: .controlBackgroundColor))
+                    if let live {
+                        // Lo que lleva de su turno
+                        RoundedRectangle(cornerRadius: 12, style: .continuous).fill(green.opacity(0.18))
+                            .frame(width: g.size.width * CGFloat(live.elapsed + 1) / CGFloat(max(live.duration, 1)))
+                    }
+                }
+            }
+        )
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .stroke(dropTarget == it.kind ? Color.accentColor : (live != nil ? green.opacity(0.8) : Color.primary.opacity(0.07)),
+                    lineWidth: dropTarget == it.kind ? 2 : 1.2))
+        .contentShape(Rectangle())
+        .draggable(RotationList.prefix + it.kind.rawValue)
+        .dropDestination(for: String.self) { items, _ in
+            dropTarget = nil
+            guard let s = items.first, s.hasPrefix(RotationList.prefix),
+                  let dragged = WidgetKind(rawValue: String(s.dropFirst(RotationList.prefix.count))) else { return false }
+            c.moveItem(dragged, onto: it.kind)
+            return true
+        } isTargeted: { over in
+            if over { dropTarget = it.kind } else if dropTarget == it.kind { dropTarget = nil }
+        }
+    }
+}
+
+/// Dibujo esquemático de una distribución del Panel.
+struct LayoutGlyph: View {
+    let layout: PanelLayout
+    let color: Color
+
+    private func box(_ x: CGFloat, _ y: CGFloat, _ bw: CGFloat, _ bh: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 4, style: .continuous).fill(color.opacity(0.85)).frame(width: bw, height: bh).position(x: x + bw / 2, y: y + bh / 2)
+    }
+
+    var body: some View {
+        GeometryReader { g in
+            let w = g.size.width, h = g.size.height, gap: CGFloat = 4
+            ZStack {
+                switch layout {
+                case .rows:
+                    let bh = (h - 2 * gap) / 3
+                    ForEach(0..<3, id: \.self) { i in box(0, CGFloat(i) * (bh + gap), w, bh) }
+                case .grid:
+                    let bw = (w - gap) / 2, bh = (h - gap) / 2
+                    ForEach(0..<4, id: \.self) { i in box(CGFloat(i % 2) * (bw + gap), CGFloat(i / 2) * (bh + gap), bw, bh) }
+                case .hero:
+                    let top = h * 0.46, bw = (w - gap) / 2, bh = h - top - gap
+                    box(0, 0, w, top)
+                    box(0, top + gap, bw, bh)
+                    box(bw + gap, top + gap, bw, bh)
+                }
+            }
+        }
+    }
+}
+
 /// Punto parpadeante que indica «en directo».
 struct LiveDot: View {
     @State private var on = false
@@ -589,6 +705,7 @@ struct WidgetSettings: View {
             }
             if item.kind == .photo { photoSettings }
             if item.kind == .weather { weatherSettings }
+            if item.kind == .panel { panelSettings }
             if item.kind == .news { newsSettings }
             if item.kind != .photo {
                 HStack(spacing: 10) {
@@ -606,6 +723,51 @@ struct WidgetSettings: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(Color.primary.opacity(0.07)))
+    }
+
+    // MARK: panel
+
+    private func tileBinding(_ i: Int) -> Binding<PanelTile> {
+        Binding(get: { item.panelTileList()[i] },
+                set: { v in
+                    var list = item.panelTileList()
+                    list[i] = v
+                    c.update(.panel) { $0.panelTiles = list.map(\.rawValue) }
+                })
+    }
+
+    @ViewBuilder private var panelSettings: some View {
+        Text("Distribución").font(.system(size: 13, weight: .medium))
+        HStack(spacing: 10) {
+            ForEach(PanelLayout.allCases) { l in
+                let on = item.layout == l
+                Button { c.update(.panel) { $0.panelLayout = l.rawValue } } label: {
+                    VStack(spacing: 6) {
+                        LayoutGlyph(layout: l, color: on ? Color.accentColor : Color.secondary).frame(width: 46, height: 62)
+                        Text(l.title).font(.system(size: 12, weight: .medium)).foregroundStyle(on ? Color.accentColor : Color.primary)
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 9)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(on ? Color.accentColor.opacity(0.15) : Color.primary.opacity(0.06)))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(on ? Color.accentColor.opacity(0.6) : .clear, lineWidth: 1.2))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        Text("Qué va en cada bloque").font(.system(size: 13, weight: .medium)).padding(.top, 4)
+        ForEach(0..<item.layout.slots, id: \.self) { i in
+            HStack(spacing: 12) {
+                Text(item.layout == .hero && i == 0 ? "Bloque grande" : "Bloque \(i + 1)").font(.system(size: 13)).foregroundStyle(.secondary).frame(width: 110, alignment: .leading)
+                Picker("", selection: tileBinding(i)) {
+                    ForEach(PanelTile.allCases) { t in Label(t.title, systemImage: t.symbol).tag(t) }
+                }
+                .labelsHidden().pickerStyle(.menu).frame(width: 220)
+            }
+        }
+        if item.panelTileList().contains(.weather) {
+            Text("Ciudad del bloque Tiempo").font(.system(size: 13, weight: .medium)).padding(.top, 4)
+            weatherSettings
+        }
     }
 
     // MARK: tiempo
@@ -656,7 +818,7 @@ struct WidgetSettings: View {
     }
 
     private func choosePlace(_ r: WeatherPlace) {
-        c.update(.weather) { $0.weatherPlace = r }
+        c.update(item.kind) { $0.weatherPlace = r }
         placeResults = []; placeQuery = ""; searched = false
     }
 
