@@ -122,6 +122,10 @@ struct ScreenConfig: Codable, Equatable {
     var items: [WidgetItem] = [WidgetItem(kind: .system)]
     var rotationSeconds = 8
     var isOn = true
+    /// Puertos USB en los que ha estado esta pantalla, del más reciente al más antiguo (para reconocerla si vuelve).
+    var aliases: [String]?
+    /// Última vez que estuvo conectada (segundos desde 1970).
+    var lastSeen: Double?
 
     static func == (a: ScreenConfig, b: ScreenConfig) -> Bool {
         a.name == b.name && a.brightness == b.brightness && a.orientation == b.orientation
@@ -171,6 +175,13 @@ struct BuildInfo {
 // MARK: - Render
 
 enum Renderer {
+    @MainActor static func image<V: View>(view: V, size: CGSize) -> CGImage? {
+        let r = ImageRenderer(content: view.frame(width: size.width, height: size.height))
+        r.scale = 1
+        r.isOpaque = true
+        return r.cgImage
+    }
+
     /// Renderiza el widget a un CGImage de exactamente `size` píxeles.
     @MainActor static func image(_ item: WidgetItem, snap: StatsSnapshot, date: Date, size: CGSize, demo: Bool = false) -> CGImage? {
         let r = ImageRenderer(content: WidgetCanvas(item: item, snap: snap, date: date, size: size, demo: demo))
@@ -373,12 +384,31 @@ final class ScreenController: ObservableObject, Identifiable {
 
     func currentItem(at date: Date = Date()) -> WidgetItem? { slot(at: date).map { config.items[$0.index] } }
 
+    // MARK: identificar
+
+    private var identifyUntil: Date?
+    var isIdentifying: Bool { (identifyUntil ?? .distantPast) > Date() }
+
+    /// Muestra el nombre y el ID en la pantalla física durante unos segundos, para saber cuál es cuál.
+    func identify(seconds: TimeInterval = 8) {
+        identifyUntil = Date().addingTimeInterval(seconds)
+        tick()
+    }
+
+    func stopIdentifying() { identifyUntil = nil; tick() }
+
     func tick() {
         let now = Date()
         let (w, h) = config.orientation.pixelSize
         guard let item = currentItem(at: now) else { preview = nil; currentKind = nil; return }
         currentKind = item.kind
-        guard let cg = Renderer.image(item, snap: SystemStats.shared.snapshot, date: now, size: CGSize(width: w, height: h)) else { return }
+        let image: CGImage?
+        if isIdentifying {
+            image = Renderer.image(view: IdentifyCard(name: config.name, key: key), size: CGSize(width: w, height: h))
+        } else {
+            image = Renderer.image(item, snap: SystemStats.shared.snapshot, date: now, size: CGSize(width: w, height: h))
+        }
+        guard let cg = image else { return }
         preview = NSImage(cgImage: cg, size: NSSize(width: w, height: h))
         guard config.isOn, !suspended, linkReady, !busy, let link else { return }
         guard let frame = Renderer.rgb565(cg, width: w, height: h) else { return }
@@ -457,6 +487,15 @@ enum ScreenEntry: Identifiable {
     }
 }
 
+/// Aviso al usuario sobre una pantalla cuya identidad conviene comprobar.
+struct IdentityNotice: Identifiable {
+    enum Kind { case inferred, new }
+    let key: String
+    let name: String
+    let kind: Kind
+    var id: String { key }
+}
+
 struct RenameRequest {
     var key: String
     var draft: String
@@ -485,6 +524,11 @@ final class ScreenManager: ObservableObject {
     private var timer: Timer?
     private var suspendReasons: Set<String> = []
     private var observing = false
+    /// Claves de pantallas que se desconectaron en esta sesión, y cuándo (para reconocerlas al volver en otro puerto).
+    private var goneAt: [String: Date] = [:]
+    @Published private(set) var notices: [IdentityNotice] = []
+    /// De dónde viene la identidad que se ha asignado «por posición» a una pantalla (clave nueva → clave antigua).
+    private var matchedFrom: [String: String] = [:]
 
     /// Apagar las pantallas cuando el Mac se bloquea o se suspende, y encenderlas al volver.
     @Published var sleepWithMac: Bool = (UserDefaults.standard.object(forKey: "sleepWithMac") as? Bool) ?? true {
@@ -524,17 +568,66 @@ final class ScreenManager: ObservableObject {
             .sorted { $0.config.name.localizedStandardCompare($1.config.name) == .orderedAscending }
     }
 
+    /// Solo para pruebas: sustituye la lista de pantallas que se ven por USB.
+    var keysOverride: (() -> [String])?
+
+    func stopTestControllers() { screens.forEach { $0.stop() } }
+
+    /// Solo para pruebas: olvida todo lo que haya en memoria.
+    func resetForTest() {
+        screens.forEach { $0.stop() }
+        screens = []; saved = [:]; goneAt = [:]; notices = []
+        setOrder([])
+        refreshOffline()
+    }
+
     func scan() {
-        let keys = USBBus.shared.connectedKeys()
+        let keys = keysOverride?() ?? USBBus.shared.connectedKeys()
         var changed = false
         // Desconectadas
-        for s in screens where !keys.contains(s.key) { s.stop(); changed = true }
+        for s in screens where !keys.contains(s.key) {
+            s.stop(); changed = true
+            goneAt[s.key] = Date()
+            saved[s.key]?.lastSeen = Date().timeIntervalSince1970
+        }
         screens.removeAll { !keys.contains($0.key) }
-        // Nuevas
-        for k in keys where !screens.contains(where: { $0.key == k }) {
-            let cfg = saved[k] ?? ScreenConfig(name: nextName())
-            if saved[k] == nil { saved[k] = cfg; persist() }
+        // Nuevas: se intenta reconocer cuáles son pantallas ya conocidas que han cambiado de puerto
+        let fresh = keys.filter { k in !screens.contains(where: { $0.key == k }) }
+        // Las pantallas «de fábrica» que creó una versión antigua al cambiar de puerto cuentan como desconocidas
+        let legacy = Set(fresh.filter { saved[$0].map(isLegacyDefault) ?? false })
+        let unknown = fresh.filter { saved[$0] == nil || legacy.contains($0) }
+        var identified = ScreenIdentity.Result()
+        if !unknown.isEmpty {
+            let candidates = saved.filter { !keys.contains($0.key) && !isLegacyDefault($0.value) }.map { key, cfg in
+                ScreenIdentity.Candidate(key: key, aliases: cfg.aliases ?? [key], lastSeen: cfg.lastSeen.map { Date(timeIntervalSince1970: $0) }, goneAt: goneAt[key])
+            }
+            identified = ScreenIdentity.resolve(unknown: unknown, candidates: candidates)
+        }
+        for k in fresh {
+            var cfg: ScreenConfig
+            var needsIdentify = false
+            if let old = identified.matches[k] {
+                if legacy.contains(k) { saved.removeValue(forKey: k) }      // la de fábrica no tenía nada que conservar
+                cfg = rebind(from: old, to: k)
+                if identified.inferred.contains(k) {
+                    notices.append(IdentityNotice(key: k, name: cfg.name, kind: .inferred)); needsIdentify = true
+                    matchedFrom[k] = old
+                }
+            } else if let s = saved[k] {
+                cfg = s
+            } else {
+                cfg = ScreenConfig(name: nextName())
+                if saved.keys.contains(where: { !keys.contains($0) }) {      // hay guardadas sin conectar: podría ser una de ellas
+                    notices.append(IdentityNotice(key: k, name: cfg.name, kind: .new)); needsIdentify = true
+                }
+            }
+            cfg.aliases = ([k] + (cfg.aliases ?? []).filter { $0 != k }).prefix(8).map { $0 }
+            cfg.lastSeen = Date().timeIntervalSince1970
+            saved[k] = cfg
+            goneAt[k] = nil
+            persist()
             let c = ScreenController(key: k, config: cfg)
+            if needsIdentify { c.identify(seconds: 10) }
             if sleepWithMac && !suspendReasons.isEmpty { c.startSuspended() }
             c.onChange = { [weak self] key, cfg in self?.saved[key] = cfg; self?.persist() }
             screens.append(c)
@@ -611,7 +704,8 @@ final class ScreenManager: ObservableObject {
 
     /// Todas las pantallas conocidas, en el orden elegido por el usuario.
     var entries: [ScreenEntry] {
-        order.compactMap { k in
+        var seen = Set<String>()
+        return order.filter { seen.insert($0).inserted }.compactMap { k in
             if let c = screens.first(where: { $0.key == k }) { return .online(c) }
             if let o = offline.first(where: { $0.key == k }) { return .offline(o) }
             return nil
@@ -676,11 +770,72 @@ final class ScreenManager: ObservableObject {
         }
     }
 
+    // MARK: identidad
+
+    /// Traslada la identidad guardada de un puerto a otro: la pantalla ha cambiado de sitio.
+    private func rebind(from old: String, to new: String) -> ScreenConfig {
+        let cfg = saved.removeValue(forKey: old) ?? ScreenConfig(name: nextName())
+        // La identidad conserva su sitio; si la clave nueva ya estaba en la lista (una pantalla de fábrica), se quita de ahí
+        setOrder(order.filter { $0 != new }.map { $0 == old ? new : $0 })
+        if selection == old { selection = new }
+        return cfg
+    }
+
+    /// Una configuración «de fábrica» creada por una versión antigua (sin historial de puertos): no contiene nada del usuario.
+    private func isLegacyDefault(_ c: ScreenConfig) -> Bool {
+        c.aliases == nil && c.lastSeen == nil
+            && c.name.hasPrefix("Pantalla ") && Int(c.name.dropFirst("Pantalla ".count)) != nil
+            && c.items.count == 1 && c.items[0].kind == .system && c.items[0].accent == WidgetKind.system.defaultAccent
+            && c.brightness == 60 && c.orientation == .portrait && c.rotationSeconds == 8 && c.isOn
+    }
+
+    /// «No es esta»: la identidad que se había asignado por posición vuelve a su sitio y esta pantalla pasa a ser nueva.
+    func rejectMatch(_ key: String) {
+        defer { dismissNotice(key) }
+        guard let c = screens.first(where: { $0.key == key }), let old = matchedFrom.removeValue(forKey: key) else { return }
+        var identity = c.config
+        identity.aliases = (identity.aliases ?? []).filter { $0 != key }
+        saved[old] = identity
+        var fresh = ScreenConfig(name: nextName())
+        fresh.aliases = [key]
+        fresh.lastSeen = Date().timeIntervalSince1970
+        c.config = fresh
+        persist()
+        refreshOffline()
+        syncOrder()
+    }
+
+    private func touchAlias(_ c: ScreenController) {
+        var cfg = c.config
+        cfg.aliases = ([c.key] + (cfg.aliases ?? []).filter { $0 != c.key }).prefix(8).map { $0 }
+        if cfg.aliases != c.config.aliases { c.config = cfg }
+    }
+
+    func dismissNotice(_ key: String) {
+        notices.removeAll { $0.key == key }
+        matchedFrom[key] = nil
+        screens.first { $0.key == key }?.stopIdentifying()
+    }
+
+    /// Intercambia la identidad (nombre, widgets, brillo…) de dos pantallas conectadas: estaban al revés.
+    func swap(_ a: ScreenController, _ b: ScreenController) {
+        let ca = a.config, cb = b.config
+        a.config = cb
+        b.config = ca
+        touchAlias(a); touchAlias(b)
+        var o = order
+        if let i = o.firstIndex(of: a.key), let j = o.firstIndex(of: b.key) { o.swapAt(i, j) }
+        setOrder(o)
+        notices.removeAll { $0.key == a.key || $0.key == b.key }
+    }
+
     /// Traslada la configuración guardada de una pantalla sin conectar a una pantalla conectada (nombre, brillo,
     /// orientación y widgets). La entrada guardada se elimina: pasa a vivir en la pantalla de destino.
     func adopt(_ o: OfflineScreen, into c: ScreenController) {
         saved.removeValue(forKey: o.key)
         c.config = o.config          // dispara el guardado y aplica brillo y orientación
+        touchAlias(c)
+        notices.removeAll { $0.key == c.key }
         persist()
         // La pantalla de destino ocupa el sitio de la guardada
         var ord: [String] = []

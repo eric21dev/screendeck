@@ -23,6 +23,9 @@ struct RootView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .overlay(alignment: .bottom) {
+            if let n = manager.notices.first { NoticeBanner(n: n).padding(.bottom, 34).padding(.horizontal, 20) }
+        }
         .alert("Renombrar pantalla", isPresented: Binding(get: { manager.renaming != nil }, set: { if !$0 { manager.renaming = nil } })) {
             TextField("Nombre", text: Binding(get: { manager.renaming?.draft ?? "" }, set: { manager.renaming?.draft = $0 }))
             Button("Guardar") { if let r = manager.renaming { manager.rename(r.key, to: r.draft) }; manager.renaming = nil }
@@ -321,8 +324,32 @@ struct ScreenDetail: View {
                     .help("Puerto USB al que está conectada. Las pantallas no tienen número de serie propio, así que ScreenDeck las reconoce por el puerto.")
             }
             Spacer()
+            identifyButton
+            identityMenu
             StatusPill(status: c.status)
         }
+    }
+
+    private var identifyButton: some View {
+        Button { c.identify() } label: { Label("Identificar", systemImage: "eye") }
+            .controlSize(.small).disabled(!c.config.isOn || c.status != .ready)
+            .help("Muestra el nombre y el ID en esa pantalla durante unos segundos, para saber cuál es.")
+    }
+
+    /// Para corregir a mano si la app ha confundido dos pantallas, o si esta es una que ya tenías guardada.
+    private var identityMenu: some View {
+        Menu {
+            ForEach(manager.screens.filter { $0.key != c.key }) { other in
+                Button("Intercambiar con «\(other.config.name)»") { manager.swap(c, other) }
+            }
+            if manager.screens.count > 1 && !manager.offline.isEmpty { Divider() }
+            ForEach(manager.offline) { o in
+                Button("Es «\(o.config.name)» (usar su configuración)") { manager.adopt(o, into: c) }
+            }
+        } label: { Label("Esta pantalla es…", systemImage: "arrow.triangle.swap") }
+        .menuStyle(.borderlessButton).fixedSize()
+        .disabled(manager.screens.count < 2 && manager.offline.isEmpty)
+        .help("Si dos pantallas están cambiadas, o esta es una que ya tenías guardada, díselo a la app.")
     }
 
     private var controls: some View {
@@ -624,6 +651,40 @@ struct RotationList: View {
         } isTargeted: { over in
             if over { dropTarget = it.kind } else if dropTarget == it.kind { dropTarget = nil }
         }
+    }
+}
+
+/// Aviso de que la app ha tenido que deducir quién es una pantalla (o de que hay una nueva).
+struct NoticeBanner: View {
+    let n: IdentityNotice
+    @EnvironmentObject var manager: ScreenManager
+
+    var body: some View {
+        let inferred = n.kind == .inferred
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: inferred ? "questionmark.circle.fill" : "plus.circle.fill")
+                .font(.system(size: 22)).foregroundStyle(inferred ? Color.orange : Color.accentColor)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(inferred ? "He reconocido una pantalla como «\(n.name)»" : "Hay una pantalla nueva: «\(n.name)»")
+                    .font(.system(size: 14, weight: .semibold))
+                Text(inferred
+                     ? "Ha cambiado de puerto USB y la he reconocido por su posición. Mira cuál es en su propia pantalla; si no es esa, corrígelo con «Esta pantalla es…»."
+                     : "No coincide con ninguna de las guardadas. Si en realidad es una que ya tenías, mira cuál es y usa «Esta pantalla es…».")
+                    .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Button("Identificar") { manager.screens.first { $0.key == n.key }?.identify() }
+                    Button("Corregir…") { manager.selection = n.key }
+                    if inferred { Button("No es esta") { manager.rejectMatch(n.key) } }
+                    Button(inferred ? "Está bien" : "Es nueva") { manager.dismissNotice(n.key) }.buttonStyle(.borderedProminent)
+                }
+                .controlSize(.small).padding(.top, 2)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: 580, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(nsColor: .windowBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color.primary.opacity(0.14), lineWidth: 1))
+        .shadow(color: .black.opacity(0.3), radius: 16, y: 6)
     }
 }
 

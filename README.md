@@ -1,6 +1,6 @@
 # ScreenDeck
 
-App nativa para macOS que controla las pantallas USB **Turing Smart Screen de 3,5"** (y sus clones `UsbMonitor` / TURZX). Detecta **todas las que enchufes**, las muestra en una barra lateral y a cada una le envías los widgets que quieras: reloj, estado del sistema, red, energía, calendario, un mensaje o una foto.
+App nativa para macOS que controla las pantallas USB **Turing Smart Screen de 3,5"** (y sus clones `UsbMonitor` / TURZX). Detecta **todas las que enchufes**, las muestra en una barra lateral y a cada una le envías los widgets que quieras: reloj, estado del sistema, red, baterías de todos tus dispositivos, calendario, tiempo, discos, procesos, GPU y temperatura, noticias, un mensaje, fotos o un panel con varias cosas a la vez.
 
 ![ScreenDeck: ventana principal](docs/images/ventana-vertical.png)
 
@@ -11,11 +11,12 @@ App nativa para macOS que controla las pantallas USB **Turing Smart Screen de 3,
 - **Detecta las pantallas solas.** Una, dos o las que tengas: aparecen y desaparecen de la barra lateral al enchufarlas y desenchufarlas. No hay que configurar puertos.
 - **Vista previa en vivo** de lo que muestra cada pantalla, dentro de la propia app. En «Qué mostrar», la tarjeta del widget que la pantalla está pintando en ese momento lleva la etiqueta **EN PANTALLA** y muestra el fotograma exacto que se envía; si hay varios en rotación, se va moviendo de una a otra en directo, con una línea que dice cuánto falta para el siguiente.
 - **Trece widgets** que se adaptan a vertical y horizontal. Marca uno y queda fijo; marca varios y se alternan cada N segundos.
-- **Ajustes por pantalla:** nombre (haz clic en él para cambiarlo), encendida/apagada, brillo, 4 orientaciones y color de cada widget. Se guardan aunque desconectes la pantalla y se recuerdan por **puerto USB**; el ID de cada una (por ejemplo `ID 2-1.4.1.3`) se ve junto a su nombre.
+- **Ajustes por pantalla:** nombre (haz clic en él para cambiarlo), encendida/apagada, brillo, 4 orientaciones y color de cada widget. Se guardan aunque desconectes la pantalla.
+- **Las reconoce aunque cambien de puerto.** Estas pantallas no tienen número de serie, así que ScreenDeck las identifica por su historial de puertos, su ruta y su posición (ver [Cómo reconoce cada pantalla](#cómo-reconoce-cada-pantalla)); si ha tenido que deducirlo, te avisa y puedes comprobarlo con **Identificar**, que dibuja el nombre en la pantalla física. El ID (el puerto USB actual, por ejemplo `ID 2-1.3.1.3`) se ve junto a su nombre.
 - **Orden y duración de la rotación:** con varios widgets, los ordenas arrastrando y cada uno puede durar lo suyo (por ejemplo 20 s el reloj y 5 s la red).
 - **Se apaga con el Mac:** las pantallas se apagan al bloquear la sesión, al apagarse las pantallas del Mac o al suspenderlo, y se encienden al volver (se puede desactivar).
 - **Orden a tu gusto:** arrastra las pantallas en la barra lateral para ordenarlas (o clic derecho → «Mover arriba» / «Mover abajo»). El orden se guarda, y una pantalla desconectada **conserva su sitio**: no salta al final ni queda siempre detrás de las conectadas.
-- **Pantallas guardadas:** las que no están conectadas se quedan en la misma lista, atenuadas y con «Sin conectar». Si has movido una pantalla a otro puerto, le trasladas su configuración con un clic (la pantalla de destino ocupa su sitio), o la olvidas.
+- **Pantallas guardadas:** las que no están conectadas se quedan en la misma lista, atenuadas y con «Sin conectar». Si la app no ha podido reconocer una pantalla que cambió de puerto, le trasladas la configuración con un clic («Esta pantalla es…», y la pantalla de destino ocupa su sitio), o la olvidas.
 - **Icono en la barra de menús** para encender o apagar cada pantalla sin abrir la ventana. Cerrar la ventana no detiene las pantallas.
 - **Pase de fotos:** el widget Foto puede mostrar una imagen o **rotar una carpeta entera** cada N segundos, en orden o aleatorio.
 - **Sin cuentas ni claves.** Solo se conecta a internet si usas **Tiempo** (Open-Meteo, con las coordenadas de la ciudad que elijas) o **Noticias** (los feeds RSS públicos de cada medio); sin ellos no hace ninguna conexión. macOS solo pregunta por permisos si eliges una carpeta protegida (Escritorio, Documentos o Descargas) para el pase de fotos. No usa servicios, ni Python, ni navegador.
@@ -41,17 +42,48 @@ ioreg -p IOUSB -l | grep -A8 UsbMonitor
 
 Otras revisiones de Turing (B, C, D) y otros tamaños usan otro protocolo y **no están soportados**.
 
-## Pase de fotos
+## Instalar con el DMG (sin compilar)
 
-El widget **Foto** tiene dos modos: una sola imagen, o una **carpeta** que se recorre sola.
+Descarga `ScreenDeck-<versión>.dmg` de la sección [Releases](https://github.com/eric21dev/screendeck/releases), arrastra ScreenDeck a Aplicaciones y ábrela. Es una app para **Apple Silicon** con firma ad-hoc: **no está notarizada por Apple**, así que macOS la bloqueará la primera vez:
 
-- Formatos: JPG, PNG, HEIC, GIF, TIFF, BMP y WebP. Ignora archivos ocultos y lo que no sea imagen; si alguna está dañada, la salta.
-- Se recorren por **orden de nombre** (`foto2` antes que `foto10`) o en **orden aleatorio**, con una mezcla distinta en cada vuelta.
-- El intervalo va de 3 a 120 segundos. Las imágenes que añadas a la carpeta aparecen solas en unos 30 segundos.
-- Con varias pantallas apuntando a la misma carpeta y el mismo intervalo, **van a la par**.
-- Por defecto la foto **rellena la pantalla** recortando los bordes; puedes pedir que se vea entera, con barras negras.
-- Las fotos se reducen al abrirlas (a 960 px, de sobra para la pantalla), así que una carpeta de fotos de 12 megapíxeles no pesa ni va lenta.
-- Respeta la orientación de las fotos hechas con el móvil.
+1. Intenta abrirla una vez.
+2. Ve a **Ajustes del Sistema → Privacidad y seguridad**, baja hasta el aviso sobre ScreenDeck y pulsa **Abrir igualmente**. (En macOS 15 o posterior ya no vale el clic derecho → Abrir.)
+3. Alternativa en la Terminal: `xattr -dr com.apple.quarantine /Applications/ScreenDeck.app`.
+
+No hace falta instalar nada más: libusb va dentro de la app. Para generar el DMG tú mismo: `./release.sh <versión>` (por ejemplo `./release.sh 1.3`).
+
+## Instalar compilando
+
+Requisitos: **macOS 15 o superior**, Apple Silicon, las herramientas de línea de comandos (`xcode-select --install`) y libusb (`brew install libusb`, solo para compilar). No hace falta Xcode. Compilando desde el código no hay aviso de Gatekeeper.
+
+```bash
+git clone https://github.com/eric21dev/screendeck.git && cd screendeck && ./install.sh
+```
+
+El instalador comprueba los requisitos, compila `ScreenDeck.app`, la copia a Aplicaciones, la abre y te dice cuántas pantallas ha detectado.
+
+```bash
+./install.sh --uninstall   # quitar la app (conserva la configuración)
+./install.sh --purge       # quitar la app y su configuración
+```
+
+Solo compilar, sin instalar: `./build.sh` deja la app en `build/ScreenDeck.app`.
+
+## Uso
+
+1. **Enchufa las pantallas.** Cada una aparece en la barra lateral con una miniatura en vivo y lo que está mostrando.
+2. **Elige una pantalla** y, en «Qué mostrar», marca los widgets que quieres. Con uno queda fijo; con varios se alternan (el ajuste «Cada widget dura» es el tiempo general).
+3. **Pulsa una tarjeta** para abrir sus ajustes: color, texto del mensaje o foto. En **Foto**, elige «Carpeta (pase de fotos)» para que vaya rotando todas las imágenes de una carpeta.
+4. **Ponle nombre** a cada pantalla: haz clic en el nombre de la cabecera (el lápiz indica que se puede editar), o clic derecho sobre ella en la barra lateral → «Renombrar…». También las que están sin conectar. Intro o salir del campo guarda el cambio; hasta 40 caracteres.
+5. **Ordénalas** arrastrando una sobre otra en la barra lateral. Se mantiene el orden aunque desenchufes alguna.
+6. **Ordena y dura:** con varios widgets marcados aparece «Orden y duración»: arrastra para cambiar el orden y elige cuánto dura cada uno (o «General»).
+7. **Ajusta** brillo y orientación. Con varias pantallas, «Copiar a las demás» replica la selección y el brillo.
+8. **Si dos pantallas se confunden** (por ejemplo, tras mover cables), pulsa **Identificar** en la cabecera para ver su nombre en la propia pantalla y corrígelo con **Esta pantalla es… → Intercambiar con…**.
+9. **Marca «Abrir al iniciar sesión»** en la barra lateral si quieres que arranque con el Mac.
+
+La ventana en modo horizontal, con otra selección de widgets y los ajustes del mensaje:
+
+![ScreenDeck en horizontal](docs/images/ventana-horizontal.png)
 
 ## Los widgets
 
@@ -73,7 +105,7 @@ En horizontal se reorganizan, no se estiran:
 
 ![Widgets en horizontal](docs/images/widgets-horizontal.png)
 
-### Widgets de datos: tiempo, discos, procesos, GPU y noticias
+### Widgets de datos y Panel: tiempo, discos, procesos, GPU, noticias y panel
 
 ![Widgets de datos en vertical](docs/images/widgets-datos-vertical.png)
 
@@ -117,61 +149,61 @@ Elige una o varias categorías y las noticias se **mezclan por turnos** entre el
 
 Con **Fuente propia (RSS)** puedes añadir el feed RSS o Atom que quieras. Las noticias y sus resúmenes pertenecen a cada medio: ScreenDeck solo muestra el titular y un extracto, como cualquier lector de RSS.
 
-La ventana en modo horizontal, con otra selección de widgets y los ajustes del mensaje:
+## Pase de fotos
 
-![ScreenDeck en horizontal](docs/images/ventana-horizontal.png)
+El widget **Foto** tiene dos modos: una sola imagen, o una **carpeta** que se recorre sola.
 
-## Instalar con el DMG (sin compilar)
-
-Descarga `ScreenDeck-<versión>.dmg` de la sección [Releases](https://github.com/eric21dev/screendeck/releases), arrastra ScreenDeck a Aplicaciones y ábrela. Es una app para **Apple Silicon** con firma ad-hoc: **no está notarizada por Apple**, así que macOS la bloqueará la primera vez:
-
-1. Intenta abrirla una vez.
-2. Ve a **Ajustes del Sistema → Privacidad y seguridad**, baja hasta el aviso sobre ScreenDeck y pulsa **Abrir igualmente**. (En macOS 15 o posterior ya no vale el clic derecho → Abrir.)
-3. Alternativa en la Terminal: `xattr -dr com.apple.quarantine /Applications/ScreenDeck.app`.
-
-No hace falta instalar nada más: libusb va dentro de la app. Para generar el DMG tú mismo: `./release.sh 1.0`.
-
-## Instalar compilando
-
-Requisitos: **macOS 15 o superior**, Apple Silicon, las herramientas de línea de comandos (`xcode-select --install`) y libusb (`brew install libusb`, solo para compilar). No hace falta Xcode. Compilando desde el código no hay aviso de Gatekeeper.
-
-```bash
-git clone https://github.com/eric21dev/screendeck.git && cd screendeck && ./install.sh
-```
-
-El instalador comprueba los requisitos, compila `ScreenDeck.app`, la copia a Aplicaciones, la abre y te dice cuántas pantallas ha detectado.
-
-```bash
-./install.sh --uninstall   # quitar la app (conserva la configuración)
-./install.sh --purge       # quitar la app y su configuración
-```
-
-Solo compilar, sin instalar: `./build.sh` deja la app en `build/ScreenDeck.app`.
-
-## Uso
-
-1. **Enchufa las pantallas.** Cada una aparece en la barra lateral con una miniatura en vivo y lo que está mostrando.
-2. **Elige una pantalla** y, en «Qué mostrar», marca los widgets que quieres. Con uno queda fijo; con varios se alternan (ajusta «Cambiar cada»).
-3. **Pulsa una tarjeta** para abrir sus ajustes: color, texto del mensaje o foto. En **Foto**, elige «Carpeta (pase de fotos)» para que vaya rotando todas las imágenes de una carpeta.
-4. **Ponle nombre** a cada pantalla: haz clic en el nombre de la cabecera (el lápiz indica que se puede editar), o clic derecho sobre ella en la barra lateral → «Renombrar…». También las que están sin conectar. Intro o salir del campo guarda el cambio; hasta 40 caracteres.
-5. **Ordénalas** arrastrando una sobre otra en la barra lateral. Se mantiene el orden aunque desenchufes alguna.
-6. **Ordena y dura:** con varios widgets marcados aparece «Orden y duración»: arrastra para cambiar el orden y elige cuánto dura cada uno (o «General»).
-7. **Ajusta** brillo y orientación. Con varias pantallas, «Copiar a las demás» replica la selección y el brillo.
-8. **Marca «Abrir al iniciar sesión»** en la barra lateral si quieres que arranque con el Mac.
+- Formatos: JPG, PNG, HEIC, GIF, TIFF, BMP y WebP. Ignora archivos ocultos y lo que no sea imagen; si alguna está dañada, la salta.
+- Se recorren por **orden de nombre** (`foto2` antes que `foto10`) o en **orden aleatorio**, con una mezcla distinta en cada vuelta.
+- El intervalo va de 3 a 120 segundos. Las imágenes que añadas a la carpeta aparecen solas en unos 30 segundos.
+- Con varias pantallas apuntando a la misma carpeta y el mismo intervalo, **van a la par**.
+- Por defecto la foto **rellena la pantalla** recortando los bordes; puedes pedir que se vea entera, con barras negras.
+- Las fotos se reducen al abrirlas (a 960 px, de sobra para la pantalla), así que una carpeta de fotos de 12 megapíxeles no pesa ni va lenta.
+- Respeta la orientación de las fotos hechas con el móvil.
 
 ## Cómo reconoce cada pantalla
 
-Estas pantallas **no tienen un número de serie propio**: todas se presentan igual (`1a86:5722`, serie `USB35INCHIPSV2`). Lo único que las distingue es el **puerto USB** en el que están, así que ScreenDeck identifica cada pantalla por la ruta de puertos (bus + puertos, por ejemplo `2-1.4.1.3`). Ese **ID** se muestra bajo el nombre, en la barra lateral, en la cabecera de la pantalla y en el menú de la barra de menús. Pasa el ratón por encima para ver la explicación.
+Estas pantallas **no tienen un número de serie propio**: todas se presentan igual (`1a86:5722`, serie `USB35INCHIPSV2`), el aparato no devuelve ningún dato por USB y las dos unidades que he comparado solo se diferencian en el puerto. **No existe un identificador permanente que leer del hardware.** Lo único que las distingue es el **puerto USB** en el que están, y ese puerto cambia si mueves el cable o si el dock o el hub se vuelven a numerar al reconectar.
+
+Por eso ScreenDeck no se fía de que el puerto sea siempre el mismo. Cada pantalla guarda una **identidad** (nombre, widgets, brillo…) con el **ID** del puerto en el que está ahora (por ejemplo `ID 2-1.3.1.3`, visible bajo el nombre), y cuando aparece una pantalla en un puerto que no conoce, intenta reconocerla por capas, de más a menos segura:
+
+1. **Historial de puertos:** ya estuvo antes en ese puerto (guarda los 8 últimos).
+2. **Misma ruta en otro bus:** por ejemplo, si enchufas el dock a otro puerto del Mac, cambia el bus pero no la ruta de hubs.
+3. **Continuidad:** se desconectaron hace unos minutos y reaparecen, en el mismo orden, en puertos nuevos (lo típico cuando el dock se renumera).
+4. **Cuenta:** hay tantas pantallas guardadas recientes sin conectar como pantallas nuevas conectadas; se emparejan por su orden físico.
+
+Las dos primeras son seguras. Las dos últimas son una **suposición razonable**, así que la app **te avisa** y te deja comprobarlo:
+
+- **Identificar** dibuja el nombre y el ID en grande en esa pantalla física durante unos segundos (botón en la cabecera de cada pantalla y en el aviso).
+- El aviso ofrece **Está bien**, **No es esta** (devuelve la identidad a su sitio y trata esta pantalla como nueva) y **Corregir…**.
+
+![Aviso de que una pantalla se ha reconocido por su posición](docs/images/aviso-identidad.png)
+
+Lo que se dibuja en la pantalla física al pulsar «Identificar», en vertical y en horizontal:
+
+![La tarjeta de Identificar en la pantalla](docs/images/identificar.png)
+
+- **Esta pantalla es…** (cabecera) corrige a mano: *Intercambiar con «…»* si dos están al revés, o *Es «…»* para usar la configuración de una guardada sin conectar. Cada identidad conserva su sitio en la lista.
 
 ![Lista de pantallas, conectadas y sin conectar mezcladas, con su ID](docs/images/lista-pantallas.png)
 
-Consecuencias que conviene conocer:
+Lo que **no** puede garantizar nadie sin un número de serie: si cambias **varias pantallas a la vez y en otro orden**, la app puede asignar mal las identidades (lo notarás al ver el nombre en la pantalla con «Identificar», y se corrige con «Intercambiar»). Si solo aparece una pantalla nueva y tienes varias guardadas sin conectar, **no adivina**: la trata como nueva y te avisa. Las guardadas que llevan más de 30 días sin verse no se emparejan por posición.
 
-- Una pantalla que **vuelves a enchufar en el mismo puerto** recupera su configuración sola, aunque hayas reiniciado el Mac.
-- Si la **cambias de puerto** (o de hub), ScreenDeck ve una pantalla nueva con la configuración por defecto. La antigua se queda en la lista, atenuada y con «Sin conectar»: ábrela y pulsa **Usar aquí** sobre la pantalla conectada para trasladarle el nombre, el brillo, la orientación y los widgets. La entrada guardada desaparece al trasladarla.
-- **Olvidar esta pantalla** borra una configuración guardada que ya no te hace falta.
-- El **nombre** que le pongas viaja con la configuración: al trasladarla a otra pantalla, se traslada también.
-- Si **intercambias dos pantallas de puerto**, se intercambian también sus configuraciones.
+Otras cosas que conviene saber:
+
+- **Olvidar esta pantalla** borra una identidad guardada que ya no te hace falta.
+- El **nombre** que le pongas viaja con la identidad: al trasladarla a otra pantalla, se traslada también.
+- Las pantallas «de fábrica» que crearon versiones anteriores al cambiar de puerto (nombre «Pantalla N» con solo el widget Sistema) se detectan y se sustituyen por la identidad que les corresponde, con el mismo aviso.
+
+## Apagar con el Mac
+
+En la barra lateral, **«Apagar al bloquear o suspender el Mac»** (activado por defecto) apaga las pantallas cuando:
+
+- se **bloquea la sesión** (menú Apple → Bloquear pantalla, o Ctrl+Cmd+Q),
+- se **apagan las pantallas** del Mac por inactividad,
+- el Mac se **suspende**, o se cambia de usuario.
+
+Al volver se encienden solas, con el brillo y la orientación de cada una. Tras despertar de la suspensión se reconectan, porque el USB puede haberse reiniciado. Se apagan por comando (no se corta la corriente), y al volver se redibuja lo que tocaba. Si lo desactivas, las pantallas siguen mostrando lo suyo con el Mac bloqueado.
 
 ## Por qué USB directo y no el puerto serie
 
@@ -199,6 +231,7 @@ Más detalles en [docs/PROTOCOLO.md](docs/PROTOCOLO.md).
 | `Sources/Services.swift` | Tiempo (Open-Meteo), lector de feeds RSS/Atom y caché de ambos |
 | `Sources/Widgets2.swift` | Los widgets de datos: Tiempo, Discos, Procesos, GPU y temperatura, Noticias |
 | `Sources/Panel.swift` | El widget Panel: distribuciones y bloques |
+| `Sources/Identity.swift` | Reconocer qué pantalla es cuál aunque cambie de puerto (historial, ruta, continuidad), y la tarjeta de «Identificar» |
 | `Sources/UI.swift` · `App.swift` | Ventana, barra lateral, galería, icono de la barra de menús |
 | `Sources/CLibUSB/` | Módulo que importa libusb en Swift |
 | `build.sh` · `install.sh` · `release.sh` | Compilar, instalar y generar el DMG |
@@ -213,17 +246,11 @@ Cada segundo, cada pantalla renderiza su widget a una imagen con `ImageRenderer`
 
 **«Se perdió la conexión» o «No se puede abrir la pantalla».** Otra app la tiene abierta. Cierra el resto de programas que la usen y espera unos segundos: ScreenDeck reintenta sola.
 
+**Dos pantallas muestran lo que no les toca, o tienen los nombres cambiados.** Han cambiado de puerto y la app las ha asignado al revés. Pulsa **Identificar** en una para ver cuál es y usa **Esta pantalla es… → Intercambiar con…**. Ver [Cómo reconoce cada pantalla](#cómo-reconoce-cada-pantalla).
+
+**Sale el aviso «He reconocido una pantalla como…» o «Hay una pantalla nueva».** La app no está segura de quién es. Pulsa **Identificar** para verlo en la propia pantalla y elige **Está bien**, **No es esta** o **Corregir…**.
+
 **macOS dice que la app «no se puede abrir».** Es el aviso de Gatekeeper por no estar notarizada: sigue los pasos de [Instalar con el DMG](#instalar-con-el-dmg-sin-compilar).
-
-## Apagar con el Mac
-
-En la barra lateral, **«Apagar al bloquear o suspender el Mac»** (activado por defecto) apaga las pantallas cuando:
-
-- se **bloquea la sesión** (menú Apple → Bloquear pantalla, o Ctrl+Cmd+Q),
-- se **apagan las pantallas** del Mac por inactividad,
-- el Mac se **suspende**, o se cambia de usuario.
-
-Al volver se encienden solas, con el brillo y la orientación de cada una. Tras despertar de la suspensión se reconectan, porque el USB puede haberse reiniciado. Se apagan por comando (no se corta la corriente), y al volver se redibuja lo que tocaba. Si lo desactivas, las pantallas siguen mostrando lo suyo con el Mac bloqueado.
 
 ## Estado y límites
 
@@ -236,6 +263,8 @@ Al volver se encienden solas, con el brillo y la orientación de cada una. Tras 
 - **Noticias:** dependen de que los feeds públicos de cada medio sigan existiendo; si alguno cambia o desaparece, se puede sustituir con «Fuente propia (RSS)».
 - **Baterías:** salen las que macOS publica: la del Mac y los accesorios conectados que informan de su batería (`pmset -g accps`, dispositivos HID y la lista de Bluetooth). No salen iPhone, iPad ni Apple Watch. Los AirPods y auriculares aparecen solo mientras estén conectados al Mac, con izquierdo, derecho y estuche cuando macOS los da; **esa parte no la he podido probar con auriculares conectados**. Se actualizan cada pocos segundos (la lista de Bluetooth, cada minuto).
 - **Apagar con el Mac:** el bloqueo de sesión se detecta con las notificaciones `com.apple.screenIsLocked` y `screenIsUnlocked`, muy usadas pero que Apple no documenta; el apagado por suspensión, por pantallas dormidas y por cambio de usuario usa notificaciones públicas. Lo he probado simulando el bloqueo y el desbloqueo; no he probado una suspensión real del Mac.
+- **Reconocer pantallas:** no existe un identificador permanente en el hardware, así que no se puede garantizar al 100 %; ver [Cómo reconoce cada pantalla](#cómo-reconoce-cada-pantalla). Lo he probado con nueve escenarios inventados y con el gestor real usando claves USB simuladas (dock que se renumera, una pantalla que cambia de puerto, volver a un puerto conocido, dock en otro puerto del Mac), y con mis propias pantallas ya cambiadas de puerto; **no he movido cables en directo para probarlo**.
+- **Arrastrar y soltar** (lista de pantallas y orden de rotación): probado a nivel de lógica; si algo no responde bien con el ratón, abre una *issue*.
 - **Procesos:** la memoria es la residente de cada app (RSS), que no coincide exactamente con la columna «Memoria» del Monitor de Actividad.
 
 ## Desarrollo
@@ -245,6 +274,9 @@ Al volver se encienden solas, con el brillo y la orientación de cada una. Tras 
 build/ScreenDeck.app/Contents/MacOS/ScreenDeck --snapshot  /ruta      # PNG de cada widget, vertical y horizontal (sin tocar las pantallas)
 build/ScreenDeck.app/Contents/MacOS/ScreenDeck --screenshots /ruta    # capturas de la ventana (las de este README)
 build/ScreenDeck.app/Contents/MacOS/ScreenDeck --selftest-rotation     # prueba el orden y la duración de la rotación (sin pantallas)
+build/ScreenDeck.app/Contents/MacOS/ScreenDeck --selftest-identity      # 9 escenarios del reconocimiento de pantallas (sin pantallas)
+build/ScreenDeck.app/Contents/MacOS/ScreenDeck --selftest-identity-live # el gestor real con claves USB simuladas (dock que se renumera, etc.)
+build/ScreenDeck.app/Contents/MacOS/ScreenDeck --selftest-real          # arranca el gestor con tus datos y pantallas reales, sin guardar nada, e imprime qué reconoce
 build/ScreenDeck.app/Contents/MacOS/ScreenDeck --selftest-sleep         # simula bloquear y desbloquear; las pantallas se apagan unos segundos
 build/ScreenDeck.app/Contents/MacOS/ScreenDeck --selftest              # lee discos, procesos, GPU y temperaturas de este Mac y descarga tiempo y noticias
 ```

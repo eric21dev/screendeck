@@ -34,6 +34,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
             return
         }
+        if args.contains("--selftest-real") {
+            Store.disabled = true
+            ScreenManager.shared.start()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                let m = ScreenManager.shared
+                for e in m.entries {
+                    switch e {
+                    case .online(let c): line("● \(c.config.name)  [\(c.key)]  widgets: \(c.config.items.map { $0.kind.rawValue }.joined(separator: ", "))  puertos conocidos: \(c.config.aliases ?? [])")
+                    case .offline(let o): line("○ \(o.config.name)  [\(o.key)]  (sin conectar)  widgets: \(o.config.items.map { $0.kind.rawValue }.joined(separator: ", "))")
+                    }
+                }
+                line("avisos: " + (m.notices.isEmpty ? "ninguno" : m.notices.map { "«\($0.name)» (\($0.kind == .inferred ? "reconocida por posición" : "pantalla nueva"))" }.joined(separator: ", ")))
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        if args.contains("--selftest-identity-live") {
+            Store.disabled = true
+            selfTestIdentityLive()
+            return
+        }
+        if args.contains("--selftest-identity") {
+            selfTestIdentity()
+            NSApp.terminate(nil)
+            return
+        }
         if args.contains("--selftest-rotation") {
             Store.disabled = true
             selfTestRotation()
@@ -66,6 +92,132 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         ScreenManager.shared.screens.forEach { $0.stop() }
+    }
+
+    /// Prueba el reconocimiento con el gestor real y claves USB simuladas (no abre ninguna pantalla ni guarda nada).
+    private func selfTestIdentityLive() {
+        let m = ScreenManager.shared
+        var keys: [String] = []
+        m.keysOverride = { keys }
+        m.resetForTest()
+        var fails = 0
+        func state() -> String {
+            m.entries.map { e -> String in
+                switch e {
+                case .online(let c): return "●\(c.config.name)@\(c.key)[\(c.config.brightness)%]"
+                case .offline(let o): return "○\(o.config.name)@\(o.key)[\(o.config.brightness)%]"
+                }
+            }.joined(separator: "  ")
+        }
+        func check(_ title: String, _ cond: Bool) { if !cond { fails += 1 }; line("   \(cond ? "✓" : "✗") \(title)") }
+        func noticeText() -> String { m.notices.map { "\($0.name)(\($0.kind == .inferred ? "por posición" : "nueva"))" }.joined(separator: ", ") }
+
+        line("1. Primera vez: dos pantallas nuevas")
+        keys = ["9-1.1.1", "9-1.1.2"]; m.scan()
+        m.rename("9-1.1.1", to: "Escritorio"); m.rename("9-1.1.2", to: "Salón")
+        m.screens.first { $0.key == "9-1.1.1" }?.config.brightness = 11
+        m.screens.first { $0.key == "9-1.1.2" }?.config.brightness = 22
+        line("   " + state())
+        check("sin avisos al ser la primera vez", m.notices.isEmpty)
+
+        line("2. El dock se renumera: se desconectan las dos y vuelven en otros puertos")
+        keys = []; m.scan()
+        line("   desconectadas: " + state())
+        keys = ["9-1.2.1", "9-1.2.2"]; m.scan()
+        line("   " + state() + "   avisos: " + noticeText())
+        check("Escritorio conserva su configuración en el puerto nuevo", m.screens.first { $0.config.name == "Escritorio" }?.config.brightness == 11 && m.screens.first { $0.config.name == "Escritorio" }?.key == "9-1.2.1")
+        check("Salón conserva su configuración en el puerto nuevo", m.screens.first { $0.config.name == "Salón" }?.config.brightness == 22 && m.screens.first { $0.config.name == "Salón" }?.key == "9-1.2.2")
+        check("no han aparecido pantallas «Pantalla N» nuevas ni quedan guardadas viejas", m.entries.count == 2 && m.offline.isEmpty)
+        check("la app avisa de que las ha reconocido por su posición", m.notices.count == 2 && m.notices.allSatisfy { $0.kind == .inferred })
+        m.notices.map(\.key).forEach { m.dismissNotice($0) }
+
+        line("3. Una sola pantalla (Salón) se cambia a otro puerto")
+        keys = ["9-1.2.1"]; m.scan()
+        keys = ["9-1.2.1", "9-5.5.5"]; m.scan()
+        line("   " + state() + "   avisos: " + noticeText())
+        check("Salón sigue siendo Salón en 9-5.5.5", m.screens.first { $0.key == "9-5.5.5" }?.config.name == "Salón" && m.screens.first { $0.key == "9-5.5.5" }?.config.brightness == 22)
+        m.notices.map(\.key).forEach { m.dismissNotice($0) }
+
+        line("4. Salón vuelve a un puerto en el que ya estuvo (historial)")
+        keys = ["9-1.2.1"]; m.scan()
+        keys = ["9-1.2.1", "9-1.2.2"]; m.scan()
+        line("   " + state() + "   avisos: " + noticeText())
+        check("Salón reconocido por el historial, sin avisos", m.screens.first { $0.key == "9-1.2.2" }?.config.name == "Salón" && m.notices.isEmpty)
+
+        line("5. El dock se enchufa a otro puerto del Mac (cambia el bus, no la ruta)")
+        keys = []; m.scan()
+        keys = ["3-1.2.1", "3-1.2.2"]; m.scan()
+        line("   " + state() + "   avisos: " + noticeText())
+        check("las dos se reconocen por la ruta, en el orden correcto y sin avisos",
+              m.screens.first { $0.key == "3-1.2.1" }?.config.name == "Escritorio" && m.screens.first { $0.key == "3-1.2.2" }?.config.name == "Salón" && m.notices.isEmpty)
+
+        line("6. Corregir a mano: intercambiar las dos")
+        if let a = m.screens.first(where: { $0.key == "3-1.2.1" }), let b = m.screens.first(where: { $0.key == "3-1.2.2" }) {
+            m.swap(a, b)
+            line("   " + state())
+            check("intercambiadas con su configuración", a.config.name == "Salón" && a.config.brightness == 22 && b.config.name == "Escritorio" && b.config.brightness == 11)
+            check("cada identidad conserva su sitio en la lista (Escritorio sigue primero)", m.entries.compactMap { e -> String? in
+                if case .online(let c) = e { return c.config.name } else { return nil } } == ["Escritorio", "Salón"])
+        }
+        line("7. Una pantalla nueva de verdad cuando hay una guardada sin conectar")
+        keys = ["3-1.2.1"]; m.scan()
+        keys = ["3-1.2.1", "7-9.9.9"]; m.scan()
+        line("   " + state() + "   avisos: " + noticeText())
+        check("se trata como la misma por continuidad (se desconectó hace segundos)", m.screens.first { $0.key == "7-9.9.9" } != nil && m.entries.count == 2)
+        m.stopTestControllers()
+        line(fails == 0 ? "Todo correcto." : "FALLAN \(fails) comprobaciones.")
+        NSApp.terminate(nil)
+    }
+
+    /// Prueba el reconocimiento de pantallas con escenarios inventados.
+    private func selfTestIdentity() {
+        let now = Date()
+        func cand(_ key: String, aliases: [String] = [], seenDaysAgo: Double? = 1, goneSecondsAgo: Double? = nil) -> ScreenIdentity.Candidate {
+            ScreenIdentity.Candidate(key: key, aliases: aliases.isEmpty ? [key] : aliases,
+                                     lastSeen: seenDaysAgo.map { now.addingTimeInterval(-$0 * 86_400) },
+                                     goneAt: goneSecondsAgo.map { now.addingTimeInterval(-$0) })
+        }
+        var fails = 0
+        func check(_ title: String, unknown: [String], candidates: [ScreenIdentity.Candidate],
+                   expect: [String: String], inferred: Set<String> = []) {
+            let r = ScreenIdentity.resolve(unknown: unknown, candidates: candidates, now: now)
+            let ok = r.matches == expect && r.inferred == inferred
+            if !ok { fails += 1 }
+            line("\(ok ? "✓" : "✗") \(title)")
+            line("    obtenido: \(r.matches.sorted { $0.key < $1.key }.map { "\($0.key)→\($0.value)" }.joined(separator: ", ").isEmpty ? "(ninguna)" : r.matches.sorted { $0.key < $1.key }.map { "\($0.key)→\($0.value)" }.joined(separator: ", "))"
+                 + (r.inferred.isEmpty ? "" : "  [por posición: \(r.inferred.sorted().joined(separator: ", "))]"))
+            if !ok { line("    esperado: \(expect) \(inferred)") }
+        }
+        check("1. El dock se renumera: las dos se desconectan y reaparecen en otros puertos",
+              unknown: ["2-1.3.1.3", "2-1.3.1.4"],
+              candidates: [cand("2-1.4.1.3", goneSecondsAgo: 5), cand("2-1.4.1.4", goneSecondsAgo: 5)],
+              expect: ["2-1.3.1.3": "2-1.4.1.3", "2-1.3.1.4": "2-1.4.1.4"], inferred: ["2-1.3.1.3", "2-1.3.1.4"])
+        check("2. Una sola pantalla se mueve a otro puerto (la otra sigue conectada)",
+              unknown: ["2-1.5.1.1"], candidates: [cand("2-1.4.1.3", goneSecondsAgo: 8)],
+              expect: ["2-1.5.1.1": "2-1.4.1.3"], inferred: ["2-1.5.1.1"])
+        check("3. Vuelve a un puerto en el que ya estuvo (historial), con otra guardada también sin conectar",
+              unknown: ["2-1.2.1.1"],
+              candidates: [cand("2-1.4.1.3", aliases: ["2-1.4.1.3", "2-1.2.1.1"], goneSecondsAgo: 3000), cand("2-1.4.1.4", goneSecondsAgo: 3000)],
+              expect: ["2-1.2.1.1": "2-1.4.1.3"])
+        check("4. El dock se enchufa a otro puerto del Mac (cambia el bus, la ruta de hubs es la misma)",
+              unknown: ["1-1.4.1.3"], candidates: [cand("2-1.4.1.3", seenDaysAgo: 20), cand("2-1.4.1.4", seenDaysAgo: 20)],
+              expect: ["1-1.4.1.3": "2-1.4.1.3"])
+        check("5. Arranque en frío: hay tantas guardadas recientes como pantallas nuevas, en otros puertos",
+              unknown: ["2-1.9.1.1", "2-1.9.1.2"], candidates: [cand("2-1.4.1.3", seenDaysAgo: 0.5), cand("2-1.4.1.4", seenDaysAgo: 0.5)],
+              expect: ["2-1.9.1.1": "2-1.4.1.3", "2-1.9.1.2": "2-1.4.1.4"], inferred: ["2-1.9.1.1", "2-1.9.1.2"])
+        check("6. Aparece 1 pantalla nueva y hay 3 guardadas sin conectar: no se adivina",
+              unknown: ["2-1.9.1.1"],
+              candidates: [cand("2-1.4.1.3"), cand("2-1.4.1.4"), cand("2-1.4.1.5")], expect: [:])
+        check("7. Las guardadas son de hace 60 días: no se consideran la misma",
+              unknown: ["2-1.9.1.1", "2-1.9.1.2"], candidates: [cand("2-1.4.1.3", seenDaysAgo: 60), cand("2-1.4.1.4", seenDaysAgo: 60)],
+              expect: [:])
+        check("8. Dos guardadas reclaman el mismo puerto antiguo (el historial no basta): decide la que se desconectó hace 10 s",
+              unknown: ["2-1.2.1.1"],
+              candidates: [cand("2-1.4.1.3", aliases: ["2-1.2.1.1"], goneSecondsAgo: 10), cand("2-1.4.1.4", aliases: ["2-1.2.1.1"], goneSecondsAgo: 400)],
+              expect: ["2-1.2.1.1": "2-1.4.1.3"], inferred: ["2-1.2.1.1"])
+        check("9. Pantalla nueva de verdad (no hay ninguna guardada sin conectar)",
+              unknown: ["2-1.4.1.3"], candidates: [], expect: [:])
+        line(fails == 0 ? "Todos los escenarios correctos." : "FALLAN \(fails) escenarios.")
     }
 
     /// Prueba la rotación con duraciones propias y el cambio de orden (sin pantallas).
@@ -188,6 +340,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     .write(to: URL(fileURLWithPath: "\(dir)/\(kind.rawValue)-\(o.isPortrait ? "v" : "h").png"))
             }
         }
+        // La tarjeta de «Identificar»
+        for o in [ScreenOrientation.portrait, .landscape] {
+            let (w, h) = o.pixelSize
+            if let cg = Renderer.image(view: IdentifyCard(name: "Escritorio", key: "2-1.4.1.3"), size: CGSize(width: w, height: h)) {
+                try? NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])?
+                    .write(to: URL(fileURLWithPath: "\(dir)/identificar-\(o.isPortrait ? "v" : "h").png"))
+            }
+        }
         // Las tres distribuciones del Panel
         for layout in PanelLayout.allCases {
             for o in [ScreenOrientation.portrait, .landscape] {
@@ -268,6 +428,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             off.orderOut(nil)
         }
 
+        /// El aviso «He reconocido una pantalla como…» tal como lo ve el usuario.
+        func saveBanner(_ name: String) {
+            let n = IdentityNotice(key: "2-1.3.1.3", name: "Pantalla B", kind: .inferred)
+            let host = NSHostingView(rootView: NoticeBanner(n: n).environmentObject(ScreenManager.shared)
+                .frame(width: 600).padding(26).background(Color(nsColor: .windowBackgroundColor)))
+            host.frame = NSRect(x: 0, y: 0, width: 652, height: 1000)
+            let off = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            off.contentView = host
+            off.setFrameOrigin(NSPoint(x: -6000, y: -6000))
+            off.orderBack(nil)
+            host.layoutSubtreeIfNeeded()
+            host.frame = NSRect(origin: .zero, size: NSSize(width: 652, height: host.fittingSize.height))
+            RunLoop.main.run(until: Date().addingTimeInterval(1.0))
+            host.layoutSubtreeIfNeeded()
+            if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                host.cacheDisplay(in: host.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(dir)/\(name).png"))
+                print("Captura \(name).png")
+            }
+            off.orderOut(nil)
+        }
+
         func configure(_ step: Int) {
             guard let c = ScreenManager.shared.screens.first else { return }
             if step == 1 {
@@ -316,6 +498,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                 if let p = ScreenManager.shared.screens.first?.config.items.first(where: { $0.kind == .panel }) {
                                     saveSettings("ajustes-panel", item: p, width: 900)
                                 }
+                                saveBanner("aviso-identidad")
                             }
                         }
                     }
